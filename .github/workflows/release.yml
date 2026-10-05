@@ -1,0 +1,80 @@
+# Builds the firmware and Mac installer, attaches them to a GitHub release,
+# and publishes the browser installer page to GitHub Pages.
+#
+# Release: push a version tag, e.g.  git tag v1.0.0 && git push origin v1.0.0
+# Pull requests: build only, as a check (nothing is published)
+# Manual run (Actions tab > Release > Run workflow): build + republish the installer page
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: platformio-${{ hashFiles('claude-status/firmware/platformio.ini') }}
+
+      - name: Install PlatformIO and esptool
+        run: pip install platformio "esptool<5"
+
+      - name: Build release files
+        run: tools/build-release.sh "${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist/
+
+      - name: Create GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            dist/Claude-Monitor-Mac.zip dist/claude-monitor-firmware.bin \
+            --title "Claude Monitor ${{ github.ref_name }}" \
+            --notes-file - <<'EOF'
+          ## Install
+
+          1. **Flash the display:** open the [browser installer](https://boujois.github.io/waveshare-esp32-claude-monitor/) in Chrome or Edge, plug in the display and click **Install**.
+          2. **Wi-Fi:** on your phone, join the `Claude-Monitor-Setup` network shown on the display and pick your Wi-Fi.
+          3. **Mac:** download **Claude-Monitor-Mac.zip** below, open it, right-click **Install.command** and choose **Open**.
+
+          If the installer page doesn't open, flash `claude-monitor-firmware.bin` with [Espressif's web flasher](https://espressif.github.io/esptool-js/) at address `0x0`.
+          EOF
+
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: dist/web
+
+  pages:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    # Pages may not be available (e.g. private repo on a free plan); don't fail the release over it
+    continue-on-error: true
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - id: deploy
+        uses: actions/deploy-pages@v4

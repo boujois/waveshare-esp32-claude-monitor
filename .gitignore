@@ -1,0 +1,15 @@
+# Build output
+.pio/
+__pycache__/
+*.pyc
+.DS_Store
+
+# Wi-Fi credentials (copy src/secrets.h.example to src/secrets.h)
+secrets.h
+
+# Local config
+claude-status/bridge/config.json
+.claude/settings.local.json
+
+# Release builds (tools/build-release.sh)
+dist/

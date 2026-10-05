@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Claude Monitor Installer</title>
+  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+  <style>
+    :root {
+      --bg: #f7f5f2; --card: #ffffff; --text: #1f1d1a; --muted: #6b6560;
+      --accent: #d97757; --accent-text: #ffffff; --line: #e7e2dc; --warn-bg: #fff4e5;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0b0f1a; --card: #151a26; --text: #f2f4f8; --muted: #a6aebf;
+              --line: #262d3d; --warn-bg: #2a2014; }
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text);
+           font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    main { max-width: 640px; margin: 0 auto; padding: 40px 16px 64px; }
+    .hero { text-align: center; margin-bottom: 28px; }
+    .dot { width: 96px; height: 96px; margin: 0 auto 16px; border-radius: 50%;
+           border: 8px solid var(--accent); background: #0b0f1a;
+           display: grid; place-items: center; color: #fff; font-weight: 700; font-size: 28px; }
+    h1 { margin: 0 0 6px; font-size: 28px; }
+    .sub { color: var(--muted); margin: 0; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+            padding: 20px 22px; margin: 16px 0; }
+    .step { display: flex; gap: 14px; }
+    .num { flex: none; width: 30px; height: 30px; border-radius: 50%; background: var(--accent);
+           color: var(--accent-text); display: grid; place-items: center; font-weight: 700; }
+    h2 { margin: 2px 0 6px; font-size: 18px; }
+    p { margin: 6px 0; }
+    .muted { color: var(--muted); font-size: 14px; }
+    .install { text-align: center; padding: 8px 0 4px; }
+    esp-web-install-button button[slot] {
+      background: var(--accent); color: var(--accent-text); border: 0; border-radius: 999px;
+      padding: 12px 28px; font-size: 17px; font-weight: 600; cursor: pointer; }
+    .warn { background: var(--warn-bg); border-radius: 10px; padding: 10px 14px; font-size: 14px; }
+    code { background: var(--line); border-radius: 5px; padding: 1px 6px; font-size: 14px; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+<main>
+  <div class="hero">
+    <div class="dot">?</div>
+    <h1>Claude Monitor installer</h1>
+    <p class="sub">Set up the round desk display that lights up when Claude needs you.</p>
+  </div>
+
+  <div class="card step">
+    <div class="num">1</div>
+    <div>
+      <h2>Plug in the display</h2>
+      <p>Connect the Waveshare ESP32-S3 round display to this computer with a USB-C cable.
+         It must be a cable that carries data. Many charging-only cables don't.</p>
+    </div>
+  </div>
+
+  <div class="card step">
+    <div class="num">2</div>
+    <div style="flex:1">
+      <h2>Install the firmware</h2>
+      <p>Click the button, choose the display from the list (it usually shows as
+         <code>USB Single Serial</code> or <code>usbmodem…</code>), and click <b>Install</b>.
+         It takes about a minute.</p>
+      <div class="install">
+        <esp-web-install-button manifest="manifest.json">
+          <button slot="activate">Install Claude Monitor</button>
+          <span slot="unsupported">
+            <p class="warn">This browser can't talk to USB devices. Open this page in
+               <b>Google Chrome</b> or <b>Microsoft Edge</b> on a computer.</p>
+          </span>
+          <span slot="not-allowed">
+            <p class="warn">The installer needs a secure (https) page. Open it from the link in the README.</p>
+          </span>
+        </esp-web-install-button>
+      </div>
+      <p class="muted">Updating an existing display keeps its Wi-Fi settings. Only choose
+         "erase" if you want to start completely fresh.</p>
+    </div>
+  </div>
+
+  <div class="card step">
+    <div class="num">3</div>
+    <div>
+      <h2>Connect it to your Wi-Fi</h2>
+      <p>The display now shows a <b>Wi-Fi setup</b> screen with a QR code. On your phone,
+         scan it or join the Wi-Fi network <code>Claude-Monitor-Setup</code>. A page opens
+         where you pick your home Wi-Fi and enter its password.</p>
+      <p class="muted">The display only works with 2.4 GHz Wi-Fi. If the page doesn't open by
+         itself, go to <code>192.168.4.1</code> in your phone's browser.</p>
+    </div>
+  </div>
+
+  <div class="card step">
+    <div class="num">4</div>
+    <div>
+      <h2>Set up your Mac</h2>
+      <p>Download <b>Claude-Monitor-Mac.zip</b> from the
+         <a href="https://github.com/boujois/waveshare-esp32-claude-monitor/releases/latest">latest release</a>,
+         open it, then right-click <b>Install.command</b> and choose <b>Open</b>.</p>
+      <p class="muted">The display switches from "Waiting for Mac" to your Claude status within a few seconds.</p>
+    </div>
+  </div>
+
+  <p class="muted" style="text-align:center">Need to change Wi-Fi later? Unplug the display and
+     plug it back in <b>3 times in a row</b>, each within 10 seconds of the last, to reopen Wi-Fi setup.</p>
+</main>
+</body>
+</html>
