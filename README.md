@@ -148,7 +148,7 @@ It stops and tells you whenever a step needs you, such as clicking **Always Allo
    - **Terminal:** `cd` into the folder and run `claude`.
 4. **Say *"set up the display"*,** or type `/setup-claude-monitor`, then follow along.
 
-Allow about 15 minutes. Most of it is the first firmware build. Under the hood, Claude follows the same steps as [Option 3](#option-3-build-it-yourself-step-by-step), so you can read along there.
+Allow about 10 minutes. Claude flashes the published firmware, the same files as Option 2, so there's nothing to build unless you ask it to build from source. The rest follows the same steps as [Option 3](#option-3-build-it-yourself-step-by-step), so you can read along there.
 
 ---
 
