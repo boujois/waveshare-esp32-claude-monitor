@@ -26,7 +26,16 @@ cat > "$PLIST" <<PLIST
 PLIST
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-launchctl bootstrap "gui/$(id -u)" "$PLIST"
+# bootout returns before the old helper has fully stopped, and bootstrap fails
+# ("5: Input/output error") until it has, so retry for a few seconds
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null && break
+  if [ "$attempt" = 10 ]; then
+    echo "Couldn't start the helper: launchctl bootstrap kept failing" >&2
+    exit 1
+  fi
+  sleep 1
+done
 echo "bridge agent installed ($PLIST), log: $LOG"
 
 "$PY" "$DIR/hooks.py" install
