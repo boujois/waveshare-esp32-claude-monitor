@@ -29,6 +29,7 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
   - [Option 1: Let Claude set it up (easiest)](#option-1-let-claude-set-it-up-easiest)
   - [Option 2: Download the installer (no coding)](#option-2-download-the-installer-no-coding)
   - [Option 3: Build it yourself, step by step](#option-3-build-it-yourself-step-by-step)
+- [Updating](#updating)
 - [Reading the screen](#reading-the-screen)
 - [Configuration](#configuration)
 - [Troubleshooting](#troubleshooting)
@@ -314,6 +315,22 @@ The display then shows **Question → *chat title* → *the question***.
 
 ---
 
+## Updating
+
+When a new version comes out, the display's footer alternates with **"Update: v1.x.x"**. The helper checks GitHub once a day. To update, do any of these:
+
+- **Ask Claude Code** *"update my Claude monitor"*. The installer adds an `update-claude-monitor` skill to Claude Code, so this works in any session.
+- **Double-click** `Update.command` from the Mac zip; the first time, right-click it and choose **Open**.
+- **Run** `"$HOME/Library/Application Support/Claude Monitor/update.sh"` in a terminal. Add `--check` to only see the versions.
+
+It updates the Mac helper, keeping your settings, and sends the new firmware to the display **over Wi-Fi**. No cable is needed; the display shows a progress ring and restarts by itself.
+
+> 🔐 **Pairing:** the first time the helper finds the display, they pair with a random key. After that, only your Mac can update the display. To pair with a different Mac, power the display on 3 times in a row, each within 10 seconds of the last. That resets its Wi-Fi and pairing.
+
+> ⚠️ **Coming from v1.0.x?** Older displays can't update over Wi-Fi yet, and older Mac installs don't have `update.sh`. Do one last manual update: re-flash from the [installer page](https://boujois.github.io/waveshare-esp32-claude-monitor/), which keeps your Wi-Fi, and run `Install.command` from the new zip. Every update after that is automatic.
+
+---
+
 ## Reading the screen
 
 ### The status screen
@@ -500,7 +517,9 @@ It's your Claude activity, so here's exactly what this project touches:
 - **Plan usage (opt-in only)** reads the terminal `claude` login's token from your Keychain and sends it **only to `api.anthropic.com`**. When the token expires, the helper runs one tiny `claude -p ok` request so the CLI renews it.
 - **Nothing else leaves your Mac.** There's no telemetry, cloud service or account.
 
-> ⚠️ The display's web endpoints have no password, so anyone on your local network could read the screenshot or push fake state to it. That's fine on a home network, but think twice on shared or office Wi-Fi.
+- **Updates:** the helper checks GitHub's public API for the latest release once a day. Firmware updates only go from your Mac to the display, using the pairing key in `config.json`.
+
+> ⚠️ Apart from firmware updates, which need the pairing key, the display's web endpoints have no password. Anyone on your local network could read the screenshot, push fake status to it or reset its Wi-Fi. That's fine on a home network, but think twice on shared or office Wi-Fi.
 
 ---
 
@@ -510,7 +529,7 @@ It's your Claude activity, so here's exactly what this project touches:
 ./claude-status/bridge/uninstall.sh
 ```
 
-This stops and removes the background service, takes our hooks back out of `~/.claude/settings.json`, and removes the `claude-status` connector from the Claude app. It saves backups first, and leaves your other hooks and connectors alone. The display then shows *Mac offline* until you re-flash it with something else.
+This stops and removes the background service, takes our hooks back out of `~/.claude/settings.json`, removes the `claude-status` connector from the Claude app and the `update-claude-monitor` skill. It saves backups first, and leaves your other hooks and connectors alone. The display then shows *Mac offline* until you re-flash it with something else.
 
 Also remove the `waiting_for_user` line from your Claude personal preferences. To sign the terminal out as well, run `claude auth logout`.
 
@@ -567,11 +586,14 @@ python3 designs.py        # writes designs/*.stl and prints fit, stability and o
 │   │   ├── chat_mcp.py              # connector for Claude app chats (waiting_for_user tool)
 │   │   ├── desktop_config.py        # adds/removes the connector in the Claude app config
 │   │   ├── install-chat-connector.sh # quits Claude, adds the connector, reopens Claude
+│   │   ├── update.py / update.sh    # updates the helper and the display (over Wi-Fi)
+│   │   ├── update-skill.md          # the update-claude-monitor skill the installer adds
 │   │   ├── hooks.py                 # adds/removes hooks in ~/.claude/settings.json
 │   │   ├── install.sh               # launchd agent + hooks + connector
 │   │   └── uninstall.sh
 │   ├── package/                     # what users download
 │   │   ├── Install.command          # double-click Mac installer
+│   │   ├── Update.command
 │   │   ├── Uninstall.command
 │   │   └── web/index.html           # browser installer page (ESP Web Tools)
 │   └── firmware/                    # ESP32-S3 firmware (PlatformIO + Arduino)

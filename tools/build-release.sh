@@ -34,6 +34,7 @@ else
 fi
 
 cp "$BUILD/bootloader.bin" "$BUILD/partitions.bin" "$BUILD/firmware.bin" "$BOOT_APP0" "$DIST/web/"
+cp "$BUILD/firmware.bin" "$DIST/claude-monitor-app.bin"  # app only: used for Wi-Fi updates
 esptool --chip esp32s3 merge_bin -o "$DIST/claude-monitor-firmware.bin" \
   --flash_mode keep --flash_freq keep --flash_size keep \
   0x0 "$BUILD/bootloader.bin" 0x8000 "$BUILD/partitions.bin" \
@@ -64,9 +65,11 @@ EOF
 echo "== Packaging Mac installer"
 PKG="$DIST/pkg/Claude Monitor"
 mkdir -p "$PKG/helper"
-cp "$ROOT/claude-status/package/Install.command" "$ROOT/claude-status/package/Uninstall.command" "$PKG/"
-(cd "$ROOT/claude-status/bridge" && cp claude_status_bridge.py chat_mcp.py hooks.py desktop_config.py \
-  find_python.sh install.sh uninstall.sh install-chat-connector.sh "$PKG/helper/")
+cp "$ROOT/claude-status/package/Install.command" "$ROOT/claude-status/package/Update.command" \
+  "$ROOT/claude-status/package/Uninstall.command" "$PKG/"
+(cd "$ROOT/claude-status/bridge" && cp claude_status_bridge.py chat_mcp.py hooks.py desktop_config.py update.py \
+  update-skill.md find_python.sh install.sh uninstall.sh update.sh install-chat-connector.sh "$PKG/helper/")
+echo "$VERSION" > "$PKG/helper/VERSION"
 chmod +x "$PKG"/*.command "$PKG"/helper/*.sh
 cat > "$PKG/READ ME FIRST.txt" <<EOF
 Claude Monitor $VERSION - Mac setup
@@ -78,7 +81,9 @@ Claude Monitor $VERSION - Mac setup
    Privacy & Security and click "Open Anyway".)
 3. Follow the questions in the window that opens.
 
-To remove everything later, right-click "Uninstall.command" and choose Open.
+To update later, right-click "Update.command" and choose Open (or just ask
+Claude Code to "update my Claude monitor"). To remove everything, right-click
+"Uninstall.command" and choose Open.
 EOF
 (cd "$DIST/pkg" && zip -qry "$DIST/Claude-Monitor-Mac.zip" "Claude Monitor")
 rm -rf "$DIST/pkg"

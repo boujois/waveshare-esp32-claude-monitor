@@ -11,6 +11,10 @@
 // Wi-Fi setup: with no saved network, the display opens its own "Claude-Monitor-Setup"
 // network. Join it from a phone (scan the QR code on screen) and pick your Wi-Fi.
 // The timezone comes from the Mac helper, so there's nothing to configure in code.
+//
+// Updates: the Mac helper pairs with the display once (POST /pair with a random key) and
+// can then send new firmware over Wi-Fi (POST /update with that key). Powering on 3 times
+// in a row also clears the pairing, for when the Mac's key is lost.
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -19,6 +23,7 @@
 #include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <Update.h>
 #include <WiFiManager.h>
 #include <esp_system.h>
 #include <time.h>
@@ -135,6 +140,7 @@ struct State {
   bool haveToday = false;
   double tokens = 0;
   uint32_t prompts = 0;
+  String update;  // newer release available, e.g. "v1.1.0"
 };
 
 static State st;
@@ -143,6 +149,7 @@ static WiFiManager wifiManager;
 static Preferences prefs;
 static String currentTz;
 static uint8_t powerCycles = 0;  // consecutive quick power-ons, for the no-button Wi-Fi reset
+static String pairKey;           // shared with the Mac helper; required for firmware updates
 
 static void applyTimezone(const String &tz) {
   currentTz = tz;
@@ -187,6 +194,7 @@ static void handleState() {
     s.tokens = t["tokens"] | 0.0;
     s.prompts = t["prompts"] | 0;
   }
+  s.update = (const char *)(doc["update"] | "");
   st = std::move(s);
 
   // The Mac helper sends its timezone as a POSIX TZ string; remember it across reboots
@@ -438,8 +446,10 @@ static void drawStatus(bool stale) {
     text(String(total) + (total == 1 ? " session open" : " sessions open"), CX, 132, COL_FAINT, &fonts::Font2);
   }
 
-  // Today's activity
-  if (st.haveToday) {
+  // Today's activity, alternating with an update notice when there's a newer release
+  if (st.update.length() && (millis() / 4000) % 2) {
+    text("Update: " + st.update, CX, 190, COL_WEEK, &fonts::Font2);
+  } else if (st.haveToday) {
     frame.setFont(&fonts::Font2);
     String today = String(st.prompts) + " prompts - " + compact(st.tokens);
     if (frame.textWidth(today) > 128) today = String(st.prompts) + "p - " + compact(st.tokens) + " tok";
@@ -468,6 +478,96 @@ static void drawMessage(const char *title, const String &line, uint32_t ring) {
   frame.pushSprite(0, 0);
 }
 
+// ---- Pairing and firmware updates over Wi-Fi ----
+
+static bool authorized() {
+  return pairKey.length() && server.header("X-Claude-Monitor-Key") == pairKey;
+}
+
+static void handleInfo() {
+  JsonDocument d;
+  d["version"] = FW_VERSION;
+  d["paired"] = pairKey.length() > 0;
+  d["ip"] = WiFi.localIP().toString();
+  String out;
+  serializeJson(d, out);
+  server.send(200, "application/json", out);
+}
+
+// The first Mac to pair owns the display; power on 3 times in a row to clear it.
+static void handlePair() {
+  String key = server.arg("plain");
+  key.trim();
+  if (pairKey.length()) {
+    server.send(403, "text/plain", "Already paired. Power the display on 3 times in a row to reset pairing.\n");
+    return;
+  }
+  if (key.length() < 16) {
+    server.send(400, "text/plain", "Key too short\n");
+    return;
+  }
+  pairKey = key;
+  prefs.putString("key", key);
+  server.send(200, "text/plain", "Paired\n");
+  Serial.println("Paired with a Mac");
+}
+
+static void drawUpdateProgress(int pct) {
+  frame.fillScreen(COL_BG);
+  frame.fillArc(CX, CY, 112, 119, 0, 360, COL_TRACK);
+  if (pct > 0) frame.fillArc(CX, CY, 112, 119, -90, -90 + 3.6f * pct, COL_WEEK);
+  text("Updating", CX, 100, COL_TEXT, &fonts::FreeSansBold12pt7b);
+  text(String(pct) + "%", CX, 128, COL_DIM, &fonts::FreeSansBold9pt7b);
+  text("Don't unplug the display", CX, 156, COL_FAINT, &fonts::Font2);
+  frame.pushSprite(0, 0);
+}
+
+static bool otaAuthed = false, otaOk = false;
+static size_t otaTotal = 0;
+
+// Called repeatedly while the firmware file streams in
+static void handleUpdateUpload() {
+  HTTPUpload &up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    otaAuthed = authorized();
+    otaOk = false;
+    if (!otaAuthed) return;
+    otaTotal = server.header("X-Firmware-Size").toInt();
+    drawUpdateProgress(0);
+    otaOk = Update.begin(otaTotal ? otaTotal : UPDATE_SIZE_UNKNOWN);
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (!otaAuthed || !otaOk) return;
+    if (Update.write(up.buf, up.currentSize) != up.currentSize) otaOk = false;
+    static uint32_t lastDraw = 0;
+    if (otaTotal && millis() - lastDraw > 250) {
+      lastDraw = millis();
+      drawUpdateProgress(min(99, (int)(100.0 * up.totalSize / otaTotal)));
+    }
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (otaAuthed && otaOk) otaOk = Update.end(true);
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    Update.abort();
+    otaOk = false;
+  }
+}
+
+static void handleUpdateDone() {
+  if (!otaAuthed) {
+    server.send(403, "text/plain", "Not paired with this Mac\n");
+    return;
+  }
+  if (!otaOk) {
+    server.send(500, "text/plain", String("Update failed: ") + Update.errorString() + "\n");
+    drawMessage("Update failed", "Still on " FW_VERSION, COL_ERR);
+    delay(2000);
+    return;
+  }
+  server.send(200, "text/plain", "Updated, restarting\n");
+  drawMessage("Updated", "Restarting...", COL_OK);
+  delay(800);
+  ESP.restart();
+}
+
 // Identifies the current set of waiting sessions, so a dismissal only lasts until something new happens.
 static String waitingKey() {
   String k;
@@ -494,6 +594,7 @@ void setup() {
   }
 
   prefs.begin("claude-status", false);
+  pairKey = prefs.getString("key", "");
   String savedTz = prefs.getString("tz", DEFAULT_TZ);
   configTzTime(savedTz.c_str(), "pool.ntp.org", "time.google.com");
   applyTimezone(savedTz);
@@ -524,6 +625,11 @@ void setup() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/screen.bmp", HTTP_GET, handleScreenshot);
   server.on("/wifi/reset", HTTP_POST, handleWifiReset);
+  server.on("/info", HTTP_GET, handleInfo);
+  server.on("/pair", HTTP_POST, handlePair);
+  server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
+  static const char *headers[] = {"X-Claude-Monitor-Key", "X-Firmware-Size"};
+  server.collectHeaders(headers, 2);
 }
 
 // Power-on N times in a row (each within POWER_CYCLE_WINDOW_MS) to forget Wi-Fi,
@@ -539,6 +645,8 @@ static bool checkPowerCycleReset() {
     powerCycles = 0;
     drawMessage("Resetting Wi-Fi", "Opening Wi-Fi setup...", COL_ERR);
     wifiManager.resetSettings();
+    prefs.remove("key");  // also forget the paired Mac, in case its key was lost
+    pairKey = "";
     delay(1500);
     return true;
   }
