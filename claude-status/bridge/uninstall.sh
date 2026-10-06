@@ -8,3 +8,4 @@ rm -f "$HOME/Library/LaunchAgents/$LABEL.plist"
 echo "bridge agent removed"
 "$PY" "$DIR/hooks.py" uninstall
 "$PY" "$DIR/desktop_config.py" uninstall
+rm -rf "$HOME/.claude/skills/update-claude-monitor"

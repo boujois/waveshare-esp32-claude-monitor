@@ -32,3 +32,10 @@ echo "bridge agent installed ($PLIST), log: $LOG"
 "$PY" "$DIR/hooks.py" install
 "$PY" "$DIR/desktop_config.py" install "$PY"
 
+# Global /update-claude-monitor skill, so any Claude Code session can run updates
+if [ -f "$DIR/update-skill.md" ]; then
+  mkdir -p "$HOME/.claude/skills/update-claude-monitor"
+  cp "$DIR/update-skill.md" "$HOME/.claude/skills/update-claude-monitor/SKILL.md"
+  echo "update skill installed (~/.claude/skills/update-claude-monitor)"
+fi
+

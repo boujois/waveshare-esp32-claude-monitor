@@ -17,7 +17,7 @@ You're helping someone get the round desk display from this project working: a W
 - Ask for things only the person knows, such as whether they want the optional parts. (Wi-Fi is entered on their phone, and the timezone comes from the Mac.) Find everything else yourself.
 - Some steps **must be done by the person**, not you. They're marked 🙋. Explain the step, give them the exact command, and wait.
 - Never read, print or search for Claude sign-in tokens or Keychain contents, and never read `~/Library/Application Support/Claude/claude_desktop_config.json` values beyond key names (other connectors keep secrets there).
-- Never commit `secrets.h` or `config.json` (both are git-ignored).
+- Never commit `secrets.h` or `config.json` (both are git-ignored), and never print `config.json`'s `device_key`, the display's pairing key.
 - If something is broken in the project itself, rather than in their setup, point them to https://github.com/boujois/waveshare-esp32-claude-monitor/issues.
 
 ## 0. Check the basics
@@ -85,15 +85,16 @@ The screen should now say **"Waiting for Mac"**. You can see exactly what's on t
 
 ## 4. Install the Mac helper and Claude Code hooks
 
-Install the helper into a permanent folder, the same one the downloadable `Install.command` uses. Then it keeps working even if they downloaded this project into Downloads and later delete it:
+Install the helper from the **latest release** into a permanent folder, the same one the downloadable `Install.command` uses. Then it keeps working even if they delete the downloaded project, and it can update itself later:
 
 ```bash
-DEST="$HOME/Library/Application Support/Claude Monitor"
-mkdir -p "$DEST" && cp claude-status/bridge/*.py claude-status/bridge/*.sh "$DEST/" && chmod +x "$DEST"/*.sh
+DEST="$HOME/Library/Application Support/Claude Monitor"; Z=$(mktemp -d)
+curl -fsSL -o "$Z/mac.zip" https://github.com/boujois/waveshare-esp32-claude-monitor/releases/latest/download/Claude-Monitor-Mac.zip
+unzip -q "$Z/mac.zip" -d "$Z" && mkdir -p "$DEST" && cp -R "$Z/Claude Monitor/helper/." "$DEST/" && chmod +x "$DEST"/*.sh
 "$DEST/install.sh"
 ```
 
-This installs a launchd agent (`com.claude-status.bridge`), adds async hooks to `~/.claude/settings.json` (backed up first), and adds the chat connector to the Claude app if the app is closed. From here on, the helper's files and `config.json` live in `$DEST`.
+This installs a launchd agent (`com.claude-status.bridge`), adds async hooks to `~/.claude/settings.json` (backed up first), adds the chat connector to the Claude app if the app is closed, and adds the global `update-claude-monitor` skill. From here on, the helper's files and `config.json` live in `$DEST`. The helper pairs with the display by itself within a minute, which is what makes Wi-Fi firmware updates possible. Only if they're changing the helper's code should you install from `claude-status/bridge` instead; that's a "dev" install, which can't update itself.
 
 - **If mDNS didn't work in step 3**, create `"$DEST/config.json"` with `{"device_host": "<IP>"}` and restart the helper with `launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge`. Suggest a DHCP reservation in their router so the IP doesn't change.
 - **Verify the helper:**
@@ -142,9 +143,7 @@ Finish with a short summary of what's set up, anything they skipped, and where t
 
 ## Updating
 
-- **Project files:** `git pull` if they cloned it; otherwise download the latest release's **Source code (zip)**.
-- **Mac helper:** repeat step 4. Copying the files again and re-running `install.sh` is safe, and keeps their `config.json`.
-- **Firmware:** repeat step 3, option A. Saved Wi-Fi is kept.
+Use the `update-claude-monitor` skill, or run `"$HOME/Library/Application Support/Claude Monitor/update.sh"` (`--check` to only compare versions). It updates the Mac helper from the latest release, keeping `config.json`, and the display over Wi-Fi. A display on v1.0.x firmware needs one last USB flash (step 3, option A) before Wi-Fi updates work; a Mac install without `update.sh` needs step 4 again.
 
 ## Changing Wi-Fi later
 
@@ -154,7 +153,7 @@ A dev build with a filled-in `secrets.h` reconnects to that network instead of o
 
 ## Uninstalling
 
-Run `"$HOME/Library/Application Support/Claude Monitor/uninstall.sh"`, then delete that folder. If the Claude app is open, the uninstaller says to run `install-chat-connector.sh --remove` from Terminal.app to remove the connector. They should also delete the personal-preferences line themselves.
+Run `"$HOME/Library/Application Support/Claude Monitor/uninstall.sh"` (it also removes the update skill), then delete that folder. If the Claude app is open, the uninstaller says to run `install-chat-connector.sh --remove` from Terminal.app to remove the connector. They should also delete the personal-preferences line themselves.
 
 ## For maintainers
 
