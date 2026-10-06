@@ -342,7 +342,7 @@ From top to bottom:
 | Headline | Badge | Shown when… |
 |---|---|---|
 | **Permission** | `!` | Claude wants to run a tool that needs your approval |
-| **Question** | `?` | Claude is asking you a multiple-choice question, or finished its reply with a question such as *"Want me to push it?"* |
+| **Question** | `?` | Claude is asking you a multiple-choice question, or its reply ends waiting on you: a question (*"Want me to push it?"*), a request (*"After you approve, I'll create the ticket"*), or a step for you to do (*"Run it on staging and paste the output"*) |
 | **Plan ready** | `!` | Claude has finished a plan and wants you to review it |
 | **Needs input** | `!` | an MCP server or agent needs something from you |
 
@@ -351,6 +351,15 @@ If several sessions are waiting, the one that has waited longest is shown, and t
 **Want it to go away?** Press the **BOOT** button on the board, if your case leaves it reachable. That hides the alert until a *new* request comes in, and the status screen then shows `N waiting` in orange instead.
 
 <br clear="right">
+
+### How replies that need you are spotted
+
+When a Claude Code turn ends, the helper reads Claude's final message:
+
+1. **Phrase check.** If the message ends with a question, or a request like *"after you approve"*, *"please confirm"*, *"should I…"* or *"over to you"*, the display shows a **Question** alert straight away.
+2. **Haiku check.** If the phrases don't catch it, the helper asks Claude Haiku, through the terminal `claude` command, whether the message is waiting on you, and gets a one-line summary for the display. Each check takes a few seconds and uses a sliver of your plan.
+
+The Haiku check needs the terminal `claude` command to be signed in, the same as the [plan usage rings](#6-optional-turn-on-plan-usage-rings). Without that sign-in, only the phrase check runs. To turn the Haiku check off, set `"check_replies": false` in `config.json`. When the helper starts, it also checks idle sessions from the last 24 hours, so nothing is missed after a restart.
 
 ### Colour guide
 
@@ -390,6 +399,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | `heartbeat_interval` | `10` | Push at least this often (seconds), even if nothing changed |
 | `done_window` | `900` | How long (seconds) a finished session shows as "done" (green) |
 | `chat_alerts` | `true` | Alert on Claude app chats (tool approvals and connector questions) |
+| `check_replies` | `true` | When a Claude Code reply doesn't obviously ask for anything, ask Haiku whether it's waiting on you (see [How replies that need you are spotted](#how-replies-that-need-you-are-spotted)) |
 | `listen_port` | `47823` | Local port for hooks. If you change it, also update the URL in `hooks.py` and re-run `install.sh` |
 
 ### Firmware: top of `claude-status/firmware/src/main.cpp`
@@ -486,6 +496,7 @@ It's your Claude activity, so here's exactly what this project touches:
 - **The helper reads** `~/.claude/sessions/` (session names and busy/idle state) and your transcript files in `~/.claude/projects/` (token counts and prompt *counts* only; it doesn't keep your messages).
 - **The display receives** session names, short details such as `Bash: npm test`, counts and usage percentages, over your local Wi-Fi.
 - **Chat alerts:** the helper reads the Claude app's chat-window log (`~/Library/Logs/Claude/claude.ai-web.log`), but only the tool approval lines, which contain a tool name. The connector sends the short question and chat title Claude gives it to the helper on `127.0.0.1`, and from there to the display.
+- **Reply checks:** when a Claude Code turn ends without an obvious question, the last 3,000 characters of Claude's reply are sent to Claude Haiku, through your own `claude` sign-in, to ask whether it's waiting on you. Turn this off with `"check_replies": false`.
 - **Plan usage (opt-in only)** reads the terminal `claude` login's token from your Keychain and sends it **only to `api.anthropic.com`**. When the token expires, the helper runs one tiny `claude -p ok` request so the CLI renews it.
 - **Nothing else leaves your Mac.** There's no telemetry, cloud service or account.
 

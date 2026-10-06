@@ -129,6 +129,8 @@ The rings use the **terminal** `claude` login, which is separate from the deskto
 3. 🙋 macOS asks whether `security` can read "Claude Code-credentials". They should click **Always Allow**.
 4. Verify with `curl -s http://127.0.0.1:47823/state | jq .usage`. You should see `h5` and `d7` percentages.
 
+The same sign-in also powers the **reply check**. When a Claude Code turn ends without an obvious question, the helper asks Haiku whether the reply is waiting on them, so requests like "after you approve, I'll…" still alert. Without the sign-in, only phrase matching runs. `"check_replies": false` in `config.json` turns it off.
+
 The helper renews an expired token by itself with one tiny `claude -p` call. Don't suggest `claude setup-token`: those tokens get HTTP 403 from the usage endpoint.
 
 ## 7. End-to-end test
