@@ -9,7 +9,7 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
   &nbsp;
   <img src="docs/images/alert-question.png" width="200" alt="Question alert: Claude is asking a question in the 'Write release notes' session">
   &nbsp;
-  <img src="docs/images/status.png" width="200" alt="Status screen: time, plan usage rings, '2 working' and a list of sessions">
+  <img src="docs/images/status.png" width="200" alt="Status screen: time, plan usage rings with pace ticks, '3 working' and a list of sessions with timers">
   &nbsp;
   <img src="docs/images/status-high-usage.png" width="200" alt="Status screen with high usage: rings turn yellow and red">
 </p>
@@ -50,14 +50,16 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
 - **What it wants**, e.g. `Bash: npm run test:e2e`, or the question Claude is asking
 - **How long it's been waiting**, and how many other sessions are waiting too
 
-The alert clears itself as soon as you respond. You don't need to touch the device.
+The alert clears itself as soon as you respond, so you don't need to touch the device. To hide it sooner, **double-tap the case**.
 
 **⚪ The rest of the time**, you get a calm status screen:
 
 - 🕐 The current time
-- 🔶 **5-hour plan usage** (outer ring) and 🔷 **weekly plan usage** (inner ring), each with a countdown to its reset
-- **How many sessions are working**, plus up to three active ones, each with a status dot
+- 🔶 **5-hour plan usage** (outer ring) and 🔷 **weekly plan usage** (inner ring), each with a countdown to its reset and a tick showing whether you're on pace
+- **How many sessions are working**, plus up to three active ones, each with a status dot and how long it's been working
 - 📊 **Today's activity**: prompts sent and tokens processed, across every session
+
+**🟢 While CI runs** on the pull request for the session you have open in the Claude app, the display shows its checks as a ring that fills in as they pass.
 
 It works with every Claude Code session on your Mac: the desktop app, the terminal and IDE extensions. It can also alert you when a **regular chat in the Claude app** needs you, either to approve a connector or tool, or to answer a question Claude has asked (see [step 7](#7-optional-alerts-for-claude-app-chats)).
 
@@ -73,6 +75,7 @@ It works with every Claude Code session on your Mac: the desktop app, the termin
 | 📶 **2.4 GHz Wi-Fi** | The ESP32 can't join 5 GHz-only networks. |
 | 🌐 **Chrome or Edge** | For the one-click firmware installer. Safari and Firefox can't talk to USB devices. |
 | 🐍 **Python 3** | For the Mac helper. macOS has it once Apple's Command Line Tools are installed; the installer offers to install them if needed. |
+| 🐙 **Optional: the [GitHub CLI](https://cli.github.com)** | For the [CI card](#the-ci-card): `brew install gh`, then `gh auth login` |
 | 🛠️ **[PlatformIO](https://platformio.org/install/cli)** | *Developers only*, to build the firmware yourself: `brew install platformio` |
 | 🖨️ **Optional: a 3D printer** | To print a [desk stand](#-stand-3d-printable-desk-stands). You'll also want a right-angle USB-C cable. Four 8 × 2 mm button magnets are optional, if you'd like to stick the stand to a metal surface. |
 
@@ -99,6 +102,7 @@ flowchart LR
         CH -- "claude-status connector<br/>(waiting_for_user)" --> B
     end
     A["Anthropic usage API<br/>(optional)"] --> B
+    G["GitHub CI checks<br/>(via gh, optional)"] --> B
     B -- "POST /state over Wi-Fi<br/>(every second when changed)" --> D["Round display<br/>claude-status.local"]
 ```
 
@@ -110,7 +114,7 @@ There are three main moving parts, plus an extra for chats:
    - **`~/.claude/sessions/`**, for which sessions are open and whether each is busy or idle
    - **your transcripts**, for today's token and prompt totals
 
-   If you turn it on, it also checks your plan usage with Anthropic. It pushes the summary to the display whenever something changes, plus a heartbeat every 10 seconds.
+   If you turn it on, it also checks your plan usage with Anthropic. If the GitHub CLI is signed in, it asks GitHub about the checks on the pull request for the session you have open in the Claude app. It pushes the summary to the display whenever something changes, plus a heartbeat every 10 seconds.
 3. **The display firmware** (`claude-status/firmware/`) joins your Wi-Fi and announces itself as `claude-status.local`. It accepts the summary on `POST /state` and draws the right screen at about 30 fps.
 4. **Chats in the Claude app** don't have hooks, so the helper uses two other signals. It watches the app's chat-window log for **tool approval prompts**. A tiny local **connector** (`chat_mcp.py`) also gives Claude a `waiting_for_user` tool, which it calls when a reply ends with a question for you.
 
@@ -339,15 +343,15 @@ It updates the Mac helper, keeping your settings, and sends the new firmware to 
 
 From top to bottom:
 
-- **Rings:** the outer 🔶 ring is your 5-hour plan usage and the inner 🔷 ring is weekly usage. They fill clockwise from 12 o'clock.
+- **Rings:** the outer 🔶 ring is your 5-hour plan usage and the inner 🔷 ring is weekly usage. They fill clockwise from 12 o'clock. The small white **tick** on each ring shows how much of that window has gone by. If the coloured arc is past its tick, you're using your plan faster than it lasts.
 - **Time:** the current time, kept in sync over the internet (NTP).
-- **`5h 38%` / `wk 64%`:** the same usage as numbers, with the time left until each limit resets underneath.
+- **`5h 38%` / `wk 64%`:** the same usage as numbers, with the time left until each limit resets underneath. When you're ahead of the tick, it shows in yellow when you'd run out at this pace instead: `out 16:40`, or `out Fri` for the weekly limit.
 - **Headline:**
   - **`2 working`:** sessions are busy
   - **`All done`** (green): sessions have finished; you'll usually see the green Done card instead
   - **`All idle`:** nothing is happening
   - **`1 waiting`** (pulsing orange): you dismissed an alert, but something still needs you
-- **Session list:** up to three active sessions, each with a dot (see the colour guide below).
+- **Session list:** up to three active sessions, each with a dot (see the colour guide below). Working sessions show how long they've been working, e.g. `12m`.
 - **Footer:** today's prompt count and total tokens processed, across all sessions.
 
 <br clear="right">
@@ -365,7 +369,9 @@ From top to bottom:
 
 If several sessions are waiting, the one that has waited longest is shown, and the footer says `+N more`.
 
-**Want it to go away?** Press the **BOOT** button on the board, if your case leaves it reachable. That hides the alert until a *new* request comes in, and the status screen then shows `N waiting` in orange instead.
+**Want it to go away?** Double-tap the case: two quick, firm taps with a fingertip, anywhere on the case. A short press of the **BOOT** button does the same, if your case leaves it reachable. That hides the alert until a *new* request comes in, and the status screen then shows `N waiting` in orange instead.
+
+Double tap uses the board's built-in motion sensor. Typing, putting a mug down or knocking on the desk doesn't set it off, and neither does picking the display up.
 
 <br clear="right">
 
@@ -377,10 +383,25 @@ The card goes away when:
 - **you reply** to that session
 - **you look at it:** open that session in the Claude app, with the app in front
 - **you were already watching:** if the session finishes while it's open in front of you, no card appears
+- **you double-tap the case** (or press **BOOT**): the sessions on the card stay hidden, and a session that finishes later still gets its own card
 
 A quick acknowledgement like *"thanks"*, *"ok"* or 👍 doesn't bring the card back when Claude answers it.
 
 Needs-input alerts always come first. If you'd rather finished sessions faded back to the status screen after a while, set `done_window` in `config.json`, for example `900` for 15 minutes.
+
+### The CI card
+
+<img src="docs/images/ci-checks.png" width="220" align="right" alt="CI card: a ring of eight checks, five passed, two running and one queued">
+
+When the session you have open in the Claude app is on a branch with an open pull request, the display shows that pull request's checks. The ring has one segment per check and fills clockwise as they pass: 🟢 passed, 🔴 failed, 🟡 running (pulsing), dark for queued and grey for cancelled. Checks that were skipped are left out. Underneath, it says how many have passed, which ones are running or failed, and when the run started or finished.
+
+It follows the session you last opened in the Claude app, so it stays up while you switch to another app to wait. A question or permission request from **another** session still comes first. The CI card then comes before the open session's own requests, which you can see in the app anyway, and before Done cards.
+
+Passed checks stay on screen for 10 minutes, then the status screen comes back (`ci_passed_window` in `config.json`). Failed checks stay until you push again. Double-tap to hide the card until the checks change.
+
+The helper asks GitHub with the [GitHub CLI](https://cli.github.com) (`gh`), every 15 seconds while checks run and every minute otherwise, so `gh` needs to be installed and signed in. Sessions in the terminal or an IDE don't get a CI card: only the Claude app tells the helper which session you have open.
+
+<br clear="right">
 
 ### How replies that need you are spotted
 
@@ -401,12 +422,16 @@ The Haiku check needs the terminal `claude` command to be signed in, the same as
 | 🔴 Red dot | Session's last turn ended with an API error |
 | 🟡 Yellow ring | Usage is 75% or more |
 | 🔴 Red ring | Usage is 90% or more. Time to pace yourself! |
+| ⚪ White tick on a usage ring | How much of that window has gone by. Usage past its tick will run out before the reset. |
+| 🟡 `out 16:40` | When you'd run out at your current pace |
+| 🟢 🔴 🟡 Ring segments | CI checks passed, failed or running, on the [CI card](#the-ci-card) |
 
 ### Other screens
 
 - **Waiting for Mac:** the display has never heard from the helper since it powered on. It shows its IP address and `claude-status.local` to help with debugging.
 - **Mac offline:** nothing has arrived for 30 seconds. Your Mac might be asleep, or the helper might have stopped.
 - **Wi-Fi setup:** the display has no saved Wi-Fi, or can't reach it. Join `Claude-Monitor-Setup` from your phone. See [Option 2, step 2](#2-connect-the-display-to-your-wi-fi) for how to bring this screen back to change networks.
+- **Diagnostics:** tap the case **5 times** quickly. It shows the firmware version, the Wi-Fi network and its signal strength, the IP address and name, when the Mac last sent an update, and how long the display has been on. The ring counts down for 30 seconds, then it closes by itself. Double-tap to close it sooner.
 
 ---
 
@@ -430,6 +455,8 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | `done_window` | `0` | How long (seconds) a finished session shows as done (the green card). `0` keeps it until you reply |
 | `chat_alerts` | `true` | Alert on Claude app chats (tool approvals and connector questions) |
 | `check_replies` | `true` | When a Claude Code reply doesn't obviously ask for anything, ask Haiku whether it's waiting on you (see [How replies that need you are spotted](#how-replies-that-need-you-are-spotted)) |
+| `ci_checks` | `true` | Show the [CI card](#the-ci-card) for the session you have open in the Claude app. Needs the GitHub CLI (`gh`), signed in |
+| `ci_passed_window` | `600` | How long (seconds) checks that passed stay on screen. `0` keeps them while the session is open |
 | `listen_port` | `47823` | Local port for hooks. If you change it, also update the URL in `hooks.py` and re-run `install.sh` |
 
 ### Firmware: top of `claude-status/firmware/src/main.cpp`
@@ -440,6 +467,8 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | `SETUP_AP` | `"Claude-Monitor-Setup"` | Name of the Wi-Fi setup network |
 | `DEFAULT_TZ` | `"UTC0"` | Timezone until the Mac helper connects. After that, the display uses your Mac's timezone automatically. |
 | `STALE_MS` | `30000` | How long (ms) without an update before showing *Mac offline* |
+| `TAP_G` | `0.25` | How firm each tap on the case must be, in g. Raise it if knocks on your desk dismiss alerts; lower it if your taps are missed. |
+| `DIAGNOSTICS_MS` | `30000` | How long (ms) the diagnostics screen stays up after 5 quick taps |
 | Brightness | `150` / `255` | Status screen / alert brightness, set at the end of `loop()` |
 
 Re-flash after changing anything with `pio run -t upload`.
@@ -469,7 +498,24 @@ Re-flash after changing anything with `pio run -t upload`.
 <details>
 <summary><b>An alert won't go away</b></summary>
 
-Alerts clear when the tool finishes, when you send a new prompt, or when Claude's turn ends. If you deny a permission and Claude stops quietly, the alert clears when that turn ends. You can also press **BOOT** to dismiss it, if your case leaves the button reachable.
+Alerts clear when the tool finishes, when you send a new prompt, or when Claude's turn ends. If you deny a permission and Claude stops quietly, the alert clears when that turn ends. You can also double-tap the case to dismiss it, or press **BOOT** if your case leaves the button reachable.
+</details>
+
+<details>
+<summary><b>Double-tapping doesn't dismiss anything</b></summary>
+
+1. Tap the metal case twice with a fingertip, firmly, with the second tap within about half a second of the first. Stop at two: three or four taps in a row don't count. It works on the alert, the CI card and the Done card; the status screen ignores it.
+2. Open `http://claude-status.local/` in a browser. `taps seen` counts the double taps and 5-tap runs the display noticed. If it says `no motion sensor`, your board doesn't have one, or it isn't answering.
+3. If light taps are missed, or knocks on your desk count, change `TAP_G` in the [firmware settings](#configuration) and re-flash.
+</details>
+
+<details>
+<summary><b>The CI card doesn't appear</b></summary>
+
+1. It only shows for the session you have open in the **Claude app**, not the terminal or an IDE, and only while that session's branch has an **open** pull request with checks.
+2. Passed checks stay for 10 minutes after they finish. To keep them up while the session is open, set `"ci_passed_window": 0` in `config.json`.
+3. In that session's folder, `gh pr view --json statusCheckRollup` should list the checks. If `gh` isn't installed, run `brew install gh`. If it says you aren't signed in, run `gh auth login`.
+4. The helper logs each change, e.g. `CI #1252 Fix the login form: running PPPRRQ`.
 </details>
 
 <details>
@@ -513,7 +559,8 @@ Close anything else using the serial port, such as `pio device monitor` or the A
 | See exactly what the helper is sending | `curl -s http://127.0.0.1:47823/state \| jq` |
 | One-off snapshot without the service | `python3 claude-status/bridge/claude_status_bridge.py --once` |
 | Screenshot of the display | Open `http://claude-status.local/screen.bmp` in a browser |
-| Display's own status page | `http://claude-status.local/` |
+| Display's own status page, including the taps it has seen | `http://claude-status.local/` |
+| Diagnostics on the display itself: version, Wi-Fi, IP | Tap the case 5 times quickly |
 | Helper log | `tail -f ~/Library/Logs/claude-status-bridge.log` |
 
 ---
@@ -528,6 +575,7 @@ It's your Claude activity, so here's exactly what this project touches:
 - **Chat alerts:** the helper reads the Claude app's chat-window log (`~/Library/Logs/Claude/claude.ai-web.log`), but only the tool approval lines, which contain a tool name. The connector sends the short question and chat title Claude gives it to the helper on `127.0.0.1`, and from there to the display.
 - **Reply checks:** when a Claude Code turn ends without an obvious question, the last 3,000 characters of Claude's reply are sent to Claude Haiku, through your own `claude` sign-in, to ask whether it's waiting on you. Turn this off with `"check_replies": false`.
 - **Plan usage (opt-in only)** reads the terminal `claude` login's token from your Keychain and sends it **only to `api.anthropic.com`**. When the token expires, the helper runs one tiny `claude -p ok` request so the CLI renews it.
+- **CI checks:** for the session you have open in the Claude app, the helper runs `gh pr view` in that session's folder, which asks **GitHub** about the branch's pull request using your own `gh` sign-in. The display gets the pull request's number and title, and the names and results of its checks. Turn this off with `"ci_checks": false`.
 - **Nothing else leaves your Mac.** There's no telemetry, cloud service or account.
 
 - **Updates:** the helper checks GitHub's public API for the latest release once a day. Firmware updates only go from your Mac to the display, using the pairing key in `config.json`.
@@ -613,6 +661,7 @@ python3 designs.py        # writes designs/*.stl and prints fit, stability and o
 │       ├── platformio.ini
 │       └── src/
 │           ├── main.cpp
+│           ├── taps.cpp / .h        # taps on the case (double tap, 5 taps), via the motion sensor
 │           └── secrets.h.example
 ├── tools/build-release.sh           # builds dist/: firmware, Mac zip, installer page
 ├── .github/workflows/release.yml    # on a v* tag: build, publish release + installer page
