@@ -373,6 +373,13 @@ If several sessions are waiting, the one that has waited longest is shown, and t
 
 When a Claude Code session finishes and doesn't need anything from you, the display shows a green **Done** card: a ✓, the session's name, a one-line summary of what it did (from the [reply check](#how-replies-that-need-you-are-spotted)), and how long ago it finished. The card stays until you send that session another message, so you can see at a glance that a task is finished. If several sessions have finished, the most recent is shown with `+N more`.
 
+The card goes away when:
+- **you reply** to that session
+- **you look at it:** open that session in the Claude app, with the app in front
+- **you were already watching:** if the session finishes while it's open in front of you, no card appears
+
+A quick acknowledgement like *"thanks"*, *"ok"* or 👍 doesn't bring the card back when Claude answers it.
+
 Needs-input alerts always come first. If you'd rather finished sessions faded back to the status screen after a while, set `done_window` in `config.json`, for example `900` for 15 minutes.
 
 ### How replies that need you are spotted

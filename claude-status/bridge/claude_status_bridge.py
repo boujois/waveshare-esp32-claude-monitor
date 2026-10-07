@@ -92,7 +92,9 @@ def ending_question(message):
     (the last sentence ending in "?", or a closing "let me know..." line)."""
     if not message:
         return None
-    text = re.sub(r"[*_`#>]+", "", message).strip()
+    text = re.sub(r"`[^`\n]*`", " ", message)  # inline code (e.g. `/login?next=`) isn't prose
+    text = re.sub(r"\?(?=[^\s\"')\]*_])", "", text)  # a "?" inside a URL or path doesn't end a question
+    text = re.sub(r"[*_`#>]+", "", text).strip()
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     if not paragraphs:
         return None
@@ -212,6 +214,24 @@ def last_turn_reply(session_id, tail_bytes=512 * 1024):
     return None, 0
 
 
+_ACK_WORDS = {"thanks", "thank", "you", "thx", "ty", "ta", "cheers", "ok", "okay", "k", "great", "cool",
+              "nice", "perfect", "awesome", "brilliant", "lovely", "excellent", "good", "sounds", "looks",
+              "done", "got", "it", "lgtm", "yep", "yes", "sure", "fine", "noted", "much", "very", "so",
+              "all", "that's", "thats", "amazing", "superb", "wonderful"}
+
+
+def is_acknowledgement(prompt):
+    """True for short replies like "thanks!", "ok great", "👍" that just acknowledge
+    a finished task, so Claude's answer to them shouldn't pop up another Done card."""
+    text = (prompt or "").strip().lower()
+    if not text or len(text) > 40:
+        return False
+    words = re.findall(r"[a-z']+", text)
+    if not words:  # emoji-only, e.g. 👍 or 🙏
+        return bool(re.fullmatch(r"[^\w\s]{1,6}", text.replace(" ", "")))
+    return all(w in _ACK_WORDS for w in words)
+
+
 class HookState:
     """Per-session waiting entries keyed by tool_use_id (or a fixed key for
     notifications/elicitations), plus finish/error times."""
@@ -299,11 +319,14 @@ class HookState:
                 w.clear()
                 s["done_at"] = 0
                 s["done_summary"] = ""
+                s["done_seen"] = False
+                s["ack"] = is_acknowledgement(ev.get("prompt"))
                 s["error"] = None
             elif name in ("Stop", "StopFailure"):
                 w.clear()
                 s["done_at"] = now
                 s["done_summary"] = ""
+                s["done_seen"] = bool(s.get("ack"))  # the reply to a "thanks" needs no Done card
                 s["error"] = ascii_text(ev.get("error") or "API error", 60) if name == "StopFailure" else None
                 reply = ev.get("last_assistant_message") if name == "Stop" else None
                 question = ending_question(reply)
@@ -360,6 +383,15 @@ class HookState:
                         self.version += 1
                     log(f"{sid[:8]} last reply is waiting on you - flagging it")
         threading.Thread(target=run, daemon=True).start()
+
+    def mark_done_seen(self, sid):
+        """You're looking at this session in the Claude app, so its Done card can go."""
+        with self.lock:
+            s = self.sessions.get(sid)
+            if s and s.get("done_at") and not s.get("done_seen"):
+                s["done_seen"] = True
+                self.version += 1
+                log(f"{sid[:8]} finished session viewed - clearing its Done card")
 
     def snapshot(self):
         with self.lock:
@@ -420,7 +452,7 @@ def build_sessions(hooks, done_window, extra_rows=()):
             row.update(state="busy", since=int((d.get("statusUpdatedAt") or 0) / 1000))
         elif h.get("error"):
             row.update(state="error", detail=h["error"], since=int(h.get("done_at") or 0))
-        elif h.get("done_at") and (not done_window or now - h["done_at"] < done_window):
+        elif h.get("done_at") and not h.get("done_seen") and (not done_window or now - h["done_at"] < done_window):
             row.update(state="done", detail=h.get("done_summary") or "", since=int(h["done_at"]))
         rows.append(row)
 
@@ -441,6 +473,53 @@ def build_sessions(hooks, done_window, extra_rows=()):
 # ---------------------------------------------------------------------------
 # Claude app chats: connector/tool approval prompts
 # ---------------------------------------------------------------------------
+
+CLAUDE_APP_ID = "com.anthropic.claudefordesktop"
+
+
+def claude_app_in_front():
+    try:
+        front = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=5).stdout.strip()
+        info = subprocess.run(["lsappinfo", "info", "-only", "bundleid", front],
+                              capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return CLAUDE_APP_ID in info
+
+
+class FocusWatcher:
+    """Which Claude Code session is open in the Claude app, from the app's log
+    ("LocalSessions.setFocusedSession: sessionId=local_..."). Session files link
+    that ID through their hostSessionId. Internal app log, so it may change."""
+
+    LOG = Path.home() / "Library/Logs/Claude/main.log"
+    PATTERN = re.compile(r"setFocusedSession: sessionId=(\S+)")
+
+    def __init__(self):
+        self.focused = None
+        self.offset = None
+        self.inode = None
+
+    def update(self):
+        try:
+            st = self.LOG.stat()
+        except OSError:
+            return self.focused
+        if self.offset is None or st.st_ino != self.inode or st.st_size < self.offset:
+            # first run: look back a little for the session that's open right now
+            self.offset = max(0, st.st_size - 256 * 1024) if self.offset is None else 0
+            self.inode = st.st_ino
+        if st.st_size > self.offset:
+            with open(self.LOG, "rb") as fh:
+                fh.seek(self.offset)
+                chunk = fh.read()
+            end = chunk.rfind(b"\n")
+            if end >= 0:
+                self.offset += end + 1
+                for m in self.PATTERN.finditer(chunk[: end + 1].decode("utf-8", "replace")):
+                    self.focused = None if m.group(1) == "null" else m.group(1)
+        return self.focused
+
 
 class ChatWatcher:
     """Tracks Claude app chats that are waiting for you:
@@ -492,13 +571,7 @@ class ChatWatcher:
         return chunk[: end + 1].decode("utf-8", "replace").splitlines()
 
     def _claude_in_front(self):
-        try:
-            front = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=5).stdout.strip()
-            info = subprocess.run(["lsappinfo", "info", "-only", "bundleid", front],
-                                  capture_output=True, text=True, timeout=5).stdout
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        return self.APP_ID in info
+        return claude_app_in_front()
 
     def update(self):
         now = time.time()
@@ -921,6 +994,7 @@ def main():
     hooks = HookState(classify=cfg["check_replies"])
     today = TodayStats()
     chats = ChatWatcher() if cfg["chat_alerts"] else None
+    focus = FocusWatcher()
     device = Device(cfg["device_host"])
     latest = {}
     usage = {"data": None, "next": 0}
@@ -973,6 +1047,12 @@ def main():
 
         if chats:
             chats.update()
+        # A finished session you're looking at in the Claude app doesn't need a Done card
+        focused = focus.update()
+        if focused and (chats.was_front if chats else claude_app_in_front()):
+            for sid, d in read_live_sessions().items():
+                if d.get("hostSessionId") == focused:
+                    hooks.mark_done_seen(sid)
         hook_snap, _ = hooks.snapshot()
         rows, counts = build_sessions(hook_snap, cfg["done_window"], chats.rows() if chats else ())
         state = {
