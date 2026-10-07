@@ -9,6 +9,7 @@ ESP32 status display over Wi-Fi:
   * today's activity       token usage + prompt count from the session transcripts
   * plan limits (opt-in)   5-hour / weekly usage from Anthropic's OAuth usage endpoint
   * CI checks              the pull request for the session open in the Claude app (GitHub CLI)
+  * Anthropic incidents    status.claude.com, for incidents affecting Claude Code
 
 Standard library only. Run directly or via the launchd agent (see install.sh).
 """
@@ -54,6 +55,8 @@ DEFAULT_CONFIG = {
     # CI checks on the pull request for the session open in the Claude app, via the GitHub CLI
     "ci_checks": True,
     "ci_passed_window": 600,  # seconds checks that passed stay on screen; 0 = while the session is open
+    # Anthropic's public status page: incidents affecting Claude Code turn the display's ring red
+    "status_page": True,
 }
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -813,6 +816,69 @@ class CIWatcher:
 
 
 # ---------------------------------------------------------------------------
+# Anthropic's status page: incidents that affect Claude Code
+# ---------------------------------------------------------------------------
+
+STATUS_URL = "https://status.claude.com/api/v2/summary.json"
+# Incidents on these components can break Claude Code sessions or Claude app chats
+# (the Console, Cowork and the rest don't)
+STATUS_COMPONENTS = ("claude code", "claude api", "claude.ai")
+IMPACT_RANK = {"critical": 0, "major": 1, "minor": 2}
+
+
+def pick_incident(summary):
+    """The worst unresolved incident in a status page summary that affects Claude Code, the
+    API or claude.ai (the newest if several are as bad), or None."""
+    found = [i for i in summary.get("incidents") or []
+             if i.get("impact") in IMPACT_RANK
+             and any((c.get("name") or "").lower().startswith(STATUS_COMPONENTS) for c in i.get("components") or [])]
+    if not found:
+        return None
+    i = min(found, key=lambda i: (IMPACT_RANK[i["impact"]], -_epoch(i.get("created_at"))))
+    return {"name": ascii_text(i.get("name")) or "Claude incident", "impact": i["impact"],
+            "status": i.get("status") or "", "since": _epoch(i.get("created_at"))}
+
+
+def current_incident():
+    req = urllib.request.Request(STATUS_URL, headers={"User-Agent": "claude-status-display/1.0"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return pick_incident(json.load(r))
+
+
+class IncidentWatcher:
+    """Checks Anthropic's status page every 2 minutes in the background. An incident shows until
+    Anthropic resolves it; if the page can't be reached for 10 minutes, it stops showing, so a
+    problem with your own connection isn't blamed on Anthropic."""
+
+    INTERVAL, GIVE_UP = 120, 600
+
+    def __init__(self):
+        self.incident = None
+        self.checked = 0  # when the page last answered
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self):
+        last_name, failing = "", False  # "" so the first check is always logged
+        while True:
+            try:
+                self.incident = current_incident()
+                self.checked = time.time()
+                failing = False
+            except (OSError, ValueError) as e:
+                if not failing:
+                    log("status page check failed:", e)
+                failing = True
+            name = self.snapshot() and self.incident["name"]
+            if name != last_name:
+                log(f"Anthropic status: {name or 'no incident affecting Claude Code'}")
+                last_name = name
+            time.sleep(self.INTERVAL)
+
+    def snapshot(self):
+        return self.incident if time.time() - self.checked < self.GIVE_UP else None
+
+
+# ---------------------------------------------------------------------------
 # Plan limits (opt-in)
 # ---------------------------------------------------------------------------
 
@@ -1093,6 +1159,7 @@ def main():
     focus = FocusWatcher()
     ci_checks = cfg["ci_checks"] and GH_CLI
     ci = CIWatcher(cfg["ci_passed_window"]) if ci_checks and not args.once else None
+    incidents = IncidentWatcher() if cfg["status_page"] and not args.once else None
     device = Device(cfg["device_host"])
     latest = {}
     usage = {"data": None, "next": 0}
@@ -1170,6 +1237,15 @@ def main():
             checks = ci.snapshot() if ci else pr_checks(cwd) if cwd else None
             if checks:
                 state["ci"] = {"id": sid[:8], **checks}
+        # An Anthropic incident affecting Claude Code: the display's ring turns red
+        incident = incidents.snapshot() if incidents else None
+        if args.once and cfg["status_page"]:
+            try:
+                incident = current_incident()
+            except (OSError, ValueError) as e:
+                log("status page check failed:", e)
+        if incident:
+            state["incident"] = incident
         # Offer an update when the helper or the display is behind the latest release
         tag = release["tag"]
         if tag and (is_newer(tag, helper_version()) or is_newer(tag, display["version"])

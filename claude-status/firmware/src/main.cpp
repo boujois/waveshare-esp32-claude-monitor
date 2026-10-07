@@ -158,7 +158,8 @@ struct State {
   bool haveToday = false;
   double tokens = 0;
   uint32_t prompts = 0;
-  String update;  // newer release available, e.g. "v1.1.0"
+  String update;    // newer release available, e.g. "v1.1.0"
+  String incident;  // an Anthropic incident affecting Claude Code, from status.claude.com
   CI ci;
 };
 
@@ -228,6 +229,7 @@ static void handleState() {
     s.ci.since = ci["since"] | 0;
   }
   s.update = (const char *)(doc["update"] | "");
+  if (!doc["incident"].isNull()) s.incident = (const char *)(doc["incident"]["name"] | "Claude incident");
   st = std::move(s);
 
   // The Mac helper sends its timezone as a POSIX TZ string; remember it across reboots
@@ -387,6 +389,23 @@ static void text(const String &s, int x, int y, uint32_t col, const lgfx::IFont 
 }
 
 static float pulse(float periodMs) { return 0.5f + 0.5f * sinf(millis() * TWO_PI / periodMs); }
+
+// A line of Font2 text centred at height y; if it's wider than w, it scrolls sideways through
+// that width like a ticker, so all of it can be read
+static void ticker(const String &s, int y, int w, uint32_t col) {
+  frame.setFont(&fonts::Font2);
+  int tw = frame.textWidth(s);
+  if (tw <= w) {
+    text(s, CX, y, col, &fonts::Font2);
+    return;
+  }
+  const int gap = 48, x0 = CX - w / 2;
+  int off = (millis() / 30) % (tw + gap);  // ~33 px a second
+  frame.setClipRect(x0, y - 9, w, 18);
+  text(s, x0 - off, y, col, &fonts::Font2, textdatum_t::middle_left);
+  text(s, x0 - off + tw + gap, y, col, &fonts::Font2, textdatum_t::middle_left);
+  frame.clearClipRect();
+}
 
 // ---- Screens ----
 
@@ -559,8 +578,16 @@ static void drawStatus(bool stale) {
   bool live = st.valid && !stale;
   bool usage = live && st.haveUsage;
 
-  ring(108, 118, usage ? st.h5 : 0, usageColor(st.h5, COL_CLAUDE));
-  ring(96, 104, usage ? st.d7 : 0, usageColor(st.d7, COL_WEEK));
+  // During an Anthropic incident, a red ring and the incident take the place of plan usage, so
+  // red error dots can be read as Anthropic's problem rather than yours
+  bool incident = live && st.incident.length();
+  if (incident) {
+    frame.fillArc(CX, CY, 106, 119, 0, 360, lerpColor(0x5A1612, COL_ERR, 0.3f + 0.5f * pulse(3000)));
+    usage = false;
+  } else {
+    ring(108, 118, usage ? st.h5 : 0, usageColor(st.h5, COL_CLAUDE));
+    ring(96, 104, usage ? st.d7 : 0, usageColor(st.d7, COL_WEEK));
+  }
 
   time_t now = time(nullptr);
   if (now > 1700000000) {
@@ -583,6 +610,12 @@ static void drawStatus(bool stale) {
     text(ip, CX, 136, COL_FAINT, &fonts::Font2);
     text(String(HOSTNAME) + ".local", CX, 154, COL_FAINT, &fonts::Font2);
     return;
+  }
+
+  if (incident) {
+    frame.setFont(&fonts::Font2);
+    text(firstFit({"Anthropic incident", "Incident"}, chordWidth(62, STATUS_TEXT_R)), CX, 62, COL_ERR, &fonts::Font2);
+    ticker(st.incident, 78, chordWidth(78, STATUS_TEXT_R), COL_DIM);
   }
 
   // Plan usage labels (5h left, weekly right). Underneath: when you'd run out at this pace, if

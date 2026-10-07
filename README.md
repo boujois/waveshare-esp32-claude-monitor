@@ -58,6 +58,7 @@ The alert clears itself as soon as you respond, so you don't need to touch the d
 - 🔶 **5-hour plan usage** (outer ring) and 🔷 **weekly plan usage** (inner ring), each with a countdown to its reset and a tick showing whether you're on pace
 - **How many sessions are working**, plus up to three active ones, each with a status dot and how long it's been working
 - 📊 **Today's activity**: prompts sent and tokens processed, across every session
+- 🔴 **Anthropic incidents**: when [Anthropic's status page](https://status.claude.com) reports a problem with Claude Code, the API or claude.ai, a red ring and the incident's name take the place of your plan usage, so you can tell when errors are on Anthropic's side
 
 **🟢 While CI runs** on the pull request for the session you have open in the Claude app, the display shows its checks as a ring that fills in as they pass.
 
@@ -103,6 +104,7 @@ flowchart LR
     end
     A["Anthropic usage API<br/>(optional)"] --> B
     G["GitHub CI checks<br/>(via gh, optional)"] --> B
+    SP["Anthropic status page<br/>(incidents)"] --> B
     B -- "POST /state over Wi-Fi<br/>(every second when changed)" --> D["Round display<br/>claude-status.local"]
 ```
 
@@ -114,7 +116,7 @@ There are three main moving parts, plus an extra for chats:
    - **`~/.claude/sessions/`**, for which sessions are open and whether each is busy or idle
    - **your transcripts**, for today's token and prompt totals
 
-   If you turn it on, it also checks your plan usage with Anthropic. If the GitHub CLI is signed in, it asks GitHub about the checks on the pull request for the session you have open in the Claude app. It pushes the summary to the display whenever something changes, plus a heartbeat every 10 seconds.
+   If you turn it on, it also checks your plan usage with Anthropic. If the GitHub CLI is signed in, it asks GitHub about the checks on the pull request for the session you have open in the Claude app. Every 2 minutes it checks Anthropic's status page for incidents. It pushes the summary to the display whenever something changes, plus a heartbeat every 10 seconds.
 3. **The display firmware** (`claude-status/firmware/`) joins your Wi-Fi and announces itself as `claude-status.local`. It accepts the summary on `POST /state` and draws the right screen at about 30 fps.
 4. **Chats in the Claude app** don't have hooks, so the helper uses two other signals. It watches the app's chat-window log for **tool approval prompts**. A tiny local **connector** (`chat_mcp.py`) also gives Claude a `waiting_for_user` tool, which it calls when a reply ends with a question for you.
 
@@ -343,7 +345,7 @@ It updates the Mac helper, keeping your settings, and sends the new firmware to 
 
 From top to bottom:
 
-- **Rings:** the outer 🔶 ring is your 5-hour plan usage and the inner 🔷 ring is weekly usage. They fill clockwise from 12 o'clock. The small white **tick** on each ring shows how much of that window has gone by. If the coloured arc is past its tick, you're using your plan faster than it lasts.
+- **Rings:** the outer 🔶 ring is your 5-hour plan usage and the inner 🔷 ring is weekly usage. They fill clockwise from 12 o'clock. The small white **tick** on each ring shows how much of that window has gone by. If the coloured arc is past its tick, you're using your plan faster than it lasts. While Anthropic has an incident affecting Claude Code, the API or claude.ai, the usage rings make way for a pulsing **red** ring, and *Anthropic incident* shows where the usage numbers were, with the incident's name scrolling underneath, e.g. *Elevated errors for Claude Opus 5.5*. Red error dots are then most likely Anthropic's problem, not yours.
 - **Time:** the current time, kept in sync over the internet (NTP).
 - **`5h 38%` / `wk 64%`:** the same usage as numbers, with the time left until each limit resets underneath. When you're ahead of the tick, it shows in yellow when you'd run out at this pace instead: `out 16:40`, or `out Fri` for the weekly limit.
 - **Headline:**
@@ -425,6 +427,7 @@ The Haiku check needs the terminal `claude` command to be signed in, the same as
 | ⚪ White tick on a usage ring | How much of that window has gone by. Usage past its tick will run out before the reset. |
 | 🟡 `out 16:40` | When you'd run out at your current pace |
 | 🟢 🔴 🟡 Ring segments | CI checks passed, failed or running, on the [CI card](#the-ci-card) |
+| 🔴 Red ring (pulsing) instead of the usage rings | Anthropic has an incident affecting Claude Code, the API or claude.ai |
 
 ### Other screens
 
@@ -457,6 +460,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | `check_replies` | `true` | When a Claude Code reply doesn't obviously ask for anything, ask Haiku whether it's waiting on you (see [How replies that need you are spotted](#how-replies-that-need-you-are-spotted)) |
 | `ci_checks` | `true` | Show the [CI card](#the-ci-card) for the session you have open in the Claude app. Needs the GitHub CLI (`gh`), signed in |
 | `ci_passed_window` | `600` | How long (seconds) checks that passed stay on screen. `0` keeps them while the session is open |
+| `status_page` | `true` | Check [Anthropic's status page](https://status.claude.com) every 2 minutes, and turn the ring red during incidents affecting Claude Code, the API or claude.ai |
 | `listen_port` | `47823` | Local port for hooks. If you change it, also update the URL in `hooks.py` and re-run `install.sh` |
 
 ### Firmware: top of `claude-status/firmware/src/main.cpp`
@@ -519,6 +523,12 @@ Alerts clear when the tool finishes, when you send a new prompt, or when Claude'
 </details>
 
 <details>
+<summary><b>The ring is red and my usage is gone</b></summary>
+
+Anthropic's [status page](https://status.claude.com) is reporting an incident that affects Claude Code, the Claude API or claude.ai; its name scrolls under *Anthropic incident* at the top of the status screen. The ring goes back to normal once Anthropic marks the incident resolved. Incidents that only affect other services, such as the Console, don't count. If the helper can't reach the status page for 10 minutes, it stops showing the incident, so a problem with your own connection isn't blamed on Anthropic.
+</details>
+
+<details>
 <summary><b>The usage rings are empty</b></summary>
 
 - Is `plan_usage` set to `true` in `config.json`? Did you restart the helper afterwards?
@@ -576,6 +586,7 @@ It's your Claude activity, so here's exactly what this project touches:
 - **Reply checks:** when a Claude Code turn ends without an obvious question, the last 3,000 characters of Claude's reply are sent to Claude Haiku, through your own `claude` sign-in, to ask whether it's waiting on you. Turn this off with `"check_replies": false`.
 - **Plan usage (opt-in only)** reads the terminal `claude` login's token from your Keychain and sends it **only to `api.anthropic.com`**. When the token expires, the helper runs one tiny `claude -p ok` request so the CLI renews it.
 - **CI checks:** for the session you have open in the Claude app, the helper runs `gh pr view` in that session's folder, which asks **GitHub** about the branch's pull request using your own `gh` sign-in. The display gets the pull request's number and title, and the names and results of its checks. Turn this off with `"ci_checks": false`.
+- **Anthropic's status page:** every 2 minutes the helper downloads the public summary from `status.claude.com`. The request carries nothing about you or your sessions. Turn this off with `"status_page": false`.
 - **Nothing else leaves your Mac.** There's no telemetry, cloud service or account.
 
 - **Updates:** the helper checks GitHub's public API for the latest release once a day. Firmware updates only go from your Mac to the display, using the pairing key in `config.json`.
