@@ -265,6 +265,28 @@ static uint32_t usageColor(float pct, uint32_t base) {
   return base;
 }
 
+// Usable width for a line of text centred at height y, inside a circle of radius r
+// (the inner edge of a ring, minus a margin). h is about half the font's height.
+static int chordWidth(int y, int r, int h = 8) {
+  int dy = abs(y - CY) + h;
+  return dy >= r ? 0 : (int)(2 * sqrtf((float)(r * r - dy * dy)));
+}
+
+constexpr int CARD_TEXT_R = 100;    // alert / Done cards: ring inner edge 106
+constexpr int STATUS_TEXT_R = 90;   // status screen: inner usage ring's inner edge 96
+
+static String fit(const String &s, int maxW);
+
+// The first wording that fits (set the font first); the last one is truncated if none do.
+static String firstFit(std::initializer_list<String> options, int maxW) {
+  String last;
+  for (const String &o : options) {
+    if (frame.textWidth(o) <= maxW) return o;
+    last = o;
+  }
+  return fit(last, maxW);
+}
+
 static String fit(const String &s, int maxW) {
   if (frame.textWidth(s) <= maxW) return s;
   String t = s;
@@ -340,6 +362,22 @@ static const char *headline(const String &kind) {
   return "Needs input";
 }
 
+// "waiting 3m  +1 more" at the bottom of a card, shortened to fit the narrow bottom of the circle
+static void drawCardFooter(const char *before, const char *after, uint32_t since, int others) {
+  const int y = 190;
+  time_t now = time(nullptr);
+  String t = since && now > 1700000000 ? duration(now - since) : String("");
+  String more = others > 0 ? "+" + String(others) + " more" : String("");
+  String sep = t.length() && more.length() ? "  " : "";
+  String full = t.length() ? before + t + after : String("");
+  String brief = t.length() ? t + after : String("");
+  frame.setFont(&fonts::Font2);
+  String foot = firstFit({full + sep + more, brief + sep + more,
+                          brief + sep + (others > 0 ? "+" + String(others) : String("")), brief},
+                         chordWidth(y, CARD_TEXT_R));
+  text(foot, CX, y, COL_FAINT, &fonts::Font2);
+}
+
 static void drawAlert(const Session &s, int others) {
   frame.fillScreen(COL_BG);
   float p = pulse(1600);
@@ -367,10 +405,7 @@ static void drawAlert(const Session &s, int others) {
     if (d2.length()) text(d2, CX, 168, COL_BRIGHT, &fonts::Font2);
   }
 
-  time_t now = time(nullptr);
-  String foot = s.since && now > 1700000000 ? "waiting " + duration(now - s.since) : String("");
-  if (others > 0) foot += (foot.length() ? "  +" : "+") + String(others) + " more";
-  text(foot, CX, 192, COL_FAINT, &fonts::Font2);
+  drawCardFooter("waiting ", "", s.since, others);
 }
 
 // Green card for a session that finished; stays until you reply to it.
@@ -402,10 +437,7 @@ static void drawDone(const Session &s, int others) {
     if (d2.length()) text(d2, CX, 168, COL_DONE_TEXT, &fonts::Font2);
   }
 
-  time_t now = time(nullptr);
-  String foot = s.since && now > 1700000000 ? "finished " + duration(now - s.since) + " ago" : String("");
-  if (others > 0) foot += (foot.length() ? "  +" : "+") + String(others) + " more";
-  text(foot, CX, 192, COL_FAINT, &fonts::Font2);
+  drawCardFooter("finished ", " ago", s.since, others);
 }
 
 static void drawStatus(bool stale) {
@@ -468,7 +500,7 @@ static void drawStatus(bool stale) {
                  : s.state == "busy"    ? lerpColor(COL_TRACK, COL_CLAUDE, pulse(1200))
                  : s.state == "error"   ? COL_ERR
                                         : COL_OK;
-    String name = fit(s.name, 140);
+    String name = fit(s.name, min(140, chordWidth(y, STATUS_TEXT_R, 9) - 12));
     int w = frame.textWidth(name) + 12;
     int x0 = CX - w / 2;
     frame.fillSmoothCircle(x0 + 3, y, 3, dot);
@@ -482,13 +514,15 @@ static void drawStatus(bool stale) {
   }
 
   // Today's activity, alternating with an update notice when there's a newer release
+  const int footY = 186;
+  frame.setFont(&fonts::Font2);
+  int footW = chordWidth(footY, STATUS_TEXT_R);
   if (st.update.length() && (millis() / 4000) % 2) {
-    text("Update: " + st.update, CX, 190, COL_WEEK, &fonts::Font2);
+    text(firstFit({"Update: " + st.update, st.update}, footW), CX, footY, COL_WEEK, &fonts::Font2);
   } else if (st.haveToday) {
-    frame.setFont(&fonts::Font2);
-    String today = String(st.prompts) + " prompts - " + compact(st.tokens);
-    if (frame.textWidth(today) > 128) today = String(st.prompts) + "p - " + compact(st.tokens) + " tok";
-    text(today, CX, 190, COL_FAINT, &fonts::Font2);
+    String p = String(st.prompts), tok = compact(st.tokens);
+    text(firstFit({p + " prompts - " + tok, p + "p - " + tok + " tok", p + "p - " + tok, tok}, footW),
+         CX, footY, COL_FAINT, &fonts::Font2);
   }
 }
 
