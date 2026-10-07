@@ -134,9 +134,11 @@ The same sign-in also powers the **reply check**. When a Claude Code turn ends w
 
 The helper renews an expired token by itself with one tiny `claude -p` call. Don't suggest `claude setup-token`: those tokens get HTTP 403 from the usage endpoint.
 
+**Also optional, the CI card:** if they use GitHub, check `gh auth status`. With the GitHub CLI installed and signed in, the display shows the checks on the pull request for the session they have open in the Claude app. There's nothing to configure; `"ci_checks": false` in `config.json` turns it off.
+
 ## 7. End-to-end test
 
-1. Use your question tool to ask them something harmless, such as how the display looks. While the question is open, the display should show a pulsing orange **Question** alert with this session's name. Confirm by taking a screenshot yourself, and ask them too. It should clear after they answer.
+1. Use your question tool to ask them something harmless, such as how the display looks. While the question is open, the display should show a pulsing orange **Question** alert with this session's name. Confirm by taking a screenshot yourself, and ask them too. Before they answer, they can double-tap the case: the alert should hide and the status screen show `1 waiting`. It clears for good after they answer.
 2. If they set up chats: ask them to open a Chat and say *"ask me a question"*, choosing **Always allow** the first time. The helper log should show `chat: question from …`.
 
 Finish with a short summary of what's set up, anything they skipped, and where the README covers configuration and troubleshooting.
