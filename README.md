@@ -324,7 +324,7 @@ The display then shows **Question → *chat title* → *the question***.
 
 ## Using a LilyGO T-RGB
 
-The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. Touch isn't used; the **BOOT** button works as described above.
+The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. The T-RGB has no motion sensor, so the case taps are **taps on the screen** instead: double-tap the screen to dismiss a card, or tap it 5 times for diagnostics. The **BOOT** button works as described above.
 
 1. Flash it over USB from source (the published installer and release files are for the Waveshare board):
    ```bash

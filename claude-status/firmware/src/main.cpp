@@ -157,6 +157,10 @@ class TRGBDisplay {
   }
 
   const char *touchName() { return panel.getTouchModelName(); }
+  bool touched() {
+    int16_t x, y;
+    return panel.getPoint(&x, &y, 1) > 0;
+  }
   int model() { return (int)panel.getModel(); }
 
   // Diagnostic (build with -DTRGB_TEST_PATTERN): six colour stripes. The left half is written
@@ -224,6 +228,41 @@ static LGFX_Sprite frame;
 
 constexpr const char *BOARD_NAME = "lilygo-t-rgb";
 static void showFrame() { lcd.present(frame); }
+
+// ---- Taps (taps.h) from the touch screen ----
+// The T-RGB has no motion sensor, so the gestures that are taps on the Waveshare's case are taps
+// on the screen here: a run of touches 60-450 ms apart; exactly two is a double tap (counted once
+// the run is over), and the fifth touch of a run counts as five taps straight away.
+namespace touchtaps {
+constexpr uint32_t POLL_MS = 10, GAP_MIN = 60, GAP_MAX = 450;
+volatile uint32_t doubles = 0, fives = 0;
+
+void watch(void *) {
+  bool wasDown = false;
+  uint32_t lastTap = 0, run = 0;
+  for (;;) {
+    uint32_t now = millis();
+    bool down = lcd.touched();
+    if (down && !wasDown && (run == 0 || now - lastTap >= GAP_MIN)) {
+      run = (run && now - lastTap <= GAP_MAX) ? run + 1 : 1;
+      lastTap = now;
+      if (run == 5) fives = fives + 1;
+    }
+    wasDown = down;
+    if (run && now - lastTap > GAP_MAX) {
+      if (run == 2) doubles = doubles + 1;
+      run = 0;
+    }
+    vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+  }
+}
+}  // namespace touchtaps
+
+bool tapsBegin(float) {
+  return xTaskCreatePinnedToCore(touchtaps::watch, "touchtaps", 4096, nullptr, 5, nullptr, 0) == pdPASS;
+}
+uint32_t doubleTapCount() { return touchtaps::doubles; }
+uint32_t fiveTapCount() { return touchtaps::fives; }
 
 // Firmware for other boards would boot but drive the wrong screen, so Wi-Fi updates only
 // accept images that carry this tag (every T-RGB build does, via this very string).
@@ -1009,7 +1048,11 @@ void setup() {
 #endif
 
   tapReady = tapsBegin(TAP_G);
+#ifdef BOARD_LILYGO_T_RGB
+  Serial.println(tapReady ? "Taps on the touch screen work" : "Couldn't start watching the touch screen");
+#else
   Serial.println(tapReady ? "Motion sensor found: taps on the case work" : "No motion sensor: taps on the case don't work");
+#endif
 
   prefs.begin("claude-status", false);
   pairKey = prefs.getString("key", "");
