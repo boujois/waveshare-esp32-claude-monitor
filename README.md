@@ -334,6 +334,12 @@ The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rg
    If the upload can't find the board, hold **BOOT**, tap **RST**, release **BOOT**, and run it again.
 2. Set up Wi-Fi from your phone and install the Mac helper exactly as for the Waveshare board (Option 2 step 3, or Option 3 step 4). Skip the firmware installer.
 
+Some T-RGB panels show mixed colours too blue, so the T-RGB build turns blue and green down a little (white balance red 100%, green 90%, blue 70%). Adjust it live from your Mac, and it's saved on the display:
+```bash
+curl -X POST "http://claude-status.local/whitebalance?r=100&g=90&b=70"
+```
+`curl http://claude-status.local/whitebalance` shows the current values; `r=100&g=100&b=100` turns the correction off.
+
 The screen type is detected from the touch controller at start-up, but the newer revision of the 2.1" board (V2) can't be told apart from the original, so it gets the original's settings. If the screen is blank, tinted or the colours look wrong, force the type by adding e.g. `-DTRGB_PANEL=LILYGO_T_RGB_2_8_INCHES` (or `LILYGO_T_RGB_2_1_INCHES_FULL_CIRCLE`, `…_HALF_CIRCLE`, `…_FULL_CIRCLE_V2`, `…_HALF_CIRCLE_V2`) to `build_flags` in the `lilygo-t-rgb` environment.
 
 Wi-Fi firmware updates from the Mac helper download the Waveshare release, so a T-RGB refuses them (`/info` reports `"board": "lilygo-t-rgb"`) and the updater reports that the update failed. To update a T-RGB, pull the repo and flash it over USB again. The panel driver in `claude-status/firmware/src/trgb/` is LilyGO's, under its MIT licence.

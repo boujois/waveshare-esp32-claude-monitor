@@ -31,6 +31,7 @@
 #include <esp_timer.h>
 #include <time.h>
 
+#include <utility>
 #include <vector>
 
 #include "taps.h"
@@ -130,10 +131,27 @@ constexpr int PIN_BOOT = 0;
 // sequence for the 2.1" or 2.8" board from the touch controller it finds. The UI is still
 // drawn into the 240x240 sprite and scaled up 2x with smoothing on the way to the panel.
 // To force a panel type, build with e.g. -DTRGB_PANEL=LILYGO_T_RGB_2_8_INCHES.
+#ifndef TRGB_WB_R  // starting white balance, in percent; adjust live with POST /whitebalance
+#define TRGB_WB_R 100
+#endif
+#ifndef TRGB_WB_G
+#define TRGB_WB_G 90
+#endif
+#ifndef TRGB_WB_B
+#define TRGB_WB_B 70
+#endif
+
 class TRGBDisplay {
   LilyGo_RGBPanel panel;
   static constexpr int OUT = 480, BAND = 16;  // output rows per transfer
   uint16_t *band = nullptr;
+
+  // White balance: per-channel gains in percent, applied to every pixel through small lookup
+  // tables. This panel shows mixed colours too blue, so blue (and a little green) is turned down.
+  uint8_t wb[3] = {TRGB_WB_R, TRGB_WB_G, TRGB_WB_B};
+  uint16_t lutR[32], lutG[64], lutB[32];
+  uint16_t rows[2][240];
+  inline uint16_t balance(uint16_t v) const { return lutR[v >> 11] | lutG[(v >> 5) & 63] | lutB[v & 31]; }
 
   // Exact (floor) average of two RGB565 pixels.
   static inline uint16_t avg(uint16_t a, uint16_t b) { return (a & b) + (((a ^ b) & 0xF7DE) >> 1); }
@@ -151,10 +169,23 @@ class TRGBDisplay {
     bool ok = panel.begin(order);
 #endif
     if (!ok) Serial.println("T-RGB panel init failed");
+    setWhiteBalance(wb[0], wb[1], wb[2]);
     Serial.printf("T-RGB: touch %s, model %d\n", panel.getTouchModelName(), (int)panel.getModel());
     band = (uint16_t *)heap_caps_malloc(OUT * BAND * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!band) band = (uint16_t *)heap_caps_malloc(OUT * BAND * 2, MALLOC_CAP_SPIRAM);
   }
+
+  void setWhiteBalance(int r, int g, int b) {
+    wb[0] = constrain(r, 0, 100);
+    wb[1] = constrain(g, 0, 100);
+    wb[2] = constrain(b, 0, 100);
+    for (int i = 0; i < 32; i++) {
+      lutR[i] = ((i * wb[0] + 50) / 100) << 11;
+      lutB[i] = (i * wb[2] + 50) / 100;
+    }
+    for (int i = 0; i < 64; i++) lutG[i] = ((i * wb[1] + 50) / 100) << 5;
+  }
+  const uint8_t *whiteBalance() const { return wb; }
 
   const char *touchName() { return panel.getTouchModelName(); }
   bool touched() {
@@ -197,22 +228,28 @@ class TRGBDisplay {
     const uint16_t *src = (const uint16_t *)spr.getBuffer();
     if (!src || !band) return;
     const int W = spr.width(), H = spr.height();  // 240 x 240
+    if (W > 240) return;
+    // LovyanGFX keeps 16-bit sprites byte-swapped; the RGB panel wants native order.
+    auto load = [&](int y, uint16_t *out) {
+      const uint16_t *in = src + y * W;
+      for (int x = 0; x < W; x++) out[x] = balance(__builtin_bswap16(in[x]));
+    };
+    uint16_t *r0 = rows[0], *r1 = rows[1];
+    load(0, r0);
     int row = 0;
     for (int y = 0; y < H; y++) {
-      const uint16_t *r0 = src + y * W;
-      const uint16_t *r1 = src + (y + 1 < H ? y + 1 : y) * W;
+      load(y + 1 < H ? y + 1 : y, r1);
       uint16_t *o0 = band + row * OUT, *o1 = o0 + OUT;
       for (int x = 0; x < W; x++) {
         int xn = x + 1 < W ? x + 1 : x;
-        // LovyanGFX keeps 16-bit sprites byte-swapped; the RGB panel wants native order.
-        uint16_t a = __builtin_bswap16(r0[x]), b = __builtin_bswap16(r0[xn]);
-        uint16_t c = __builtin_bswap16(r1[x]), d = __builtin_bswap16(r1[xn]);
+        uint16_t a = r0[x], b = r0[xn], c = r1[x], d = r1[xn];
         uint16_t ab = avg(a, b), ac = avg(a, c);
         o0[2 * x] = a;
         o0[2 * x + 1] = ab;
         o1[2 * x] = ac;
         o1[2 * x + 1] = avg(ab, avg(c, d));
       }
+      std::swap(r0, r1);
       row += 2;
       if (row == BAND) {
         int oy = 2 * y + 2 - BAND;
@@ -398,6 +435,25 @@ static void handleState() {
   }
   server.send(200, "application/json", "{\"ok\":true}");
 }
+
+#ifdef BOARD_LILYGO_T_RGB
+// GET shows the white balance; POST /whitebalance?r=100&g=90&b=70 (percent) changes and saves it.
+static void handleWhiteBalance() {
+  if (server.method() == HTTP_POST) {
+    const uint8_t *cur = lcd.whiteBalance();
+    int r = server.hasArg("r") ? server.arg("r").toInt() : cur[0];
+    int g = server.hasArg("g") ? server.arg("g").toInt() : cur[1];
+    int b = server.hasArg("b") ? server.arg("b").toInt() : cur[2];
+    lcd.setWhiteBalance(r, g, b);
+    const uint8_t *wb = lcd.whiteBalance();
+    prefs.putUChar("wbR", wb[0]);
+    prefs.putUChar("wbG", wb[1]);
+    prefs.putUChar("wbB", wb[2]);
+  }
+  const uint8_t *wb = lcd.whiteBalance();
+  server.send(200, "text/plain", "white balance r=" + String(wb[0]) + " g=" + String(wb[1]) + " b=" + String(wb[2]) + "\n");
+}
+#endif
 
 static void handleWifiReset() {
   server.send(200, "text/plain", "Forgetting Wi-Fi and restarting into Wi-Fi setup\n");
@@ -1055,6 +1111,9 @@ void setup() {
 #endif
 
   prefs.begin("claude-status", false);
+#ifdef BOARD_LILYGO_T_RGB
+  lcd.setWhiteBalance(prefs.getUChar("wbR", TRGB_WB_R), prefs.getUChar("wbG", TRGB_WB_G), prefs.getUChar("wbB", TRGB_WB_B));
+#endif
   pairKey = prefs.getString("key", "");
   String savedTz = prefs.getString("tz", DEFAULT_TZ);
   configTzTime(savedTz.c_str(), "pool.ntp.org", "time.google.com");
@@ -1086,6 +1145,9 @@ void setup() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/screen.bmp", HTTP_GET, handleScreenshot);
   server.on("/wifi/reset", HTTP_POST, handleWifiReset);
+#ifdef BOARD_LILYGO_T_RGB
+  server.on("/whitebalance", handleWhiteBalance);
+#endif
   server.on("/info", HTTP_GET, handleInfo);
   server.on("/pair", HTTP_POST, handlePair);
   server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
