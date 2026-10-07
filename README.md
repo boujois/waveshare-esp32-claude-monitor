@@ -29,6 +29,7 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
   - [Option 1: Let Claude set it up (easiest)](#option-1-let-claude-set-it-up-easiest)
   - [Option 2: Download the installer (no coding)](#option-2-download-the-installer-no-coding)
   - [Option 3: Build it yourself, step by step](#option-3-build-it-yourself-step-by-step)
+- [Using a LilyGO T-RGB](#using-a-lilygo-t-rgb)
 - [Updating](#updating)
 - [Reading the screen](#reading-the-screen)
 - [Configuration](#configuration)
@@ -227,6 +228,8 @@ cd claude-status/firmware
 pio run -t upload
 ```
 
+> 🟣 **Got a LilyGO T-RGB instead?** Build its environment: `pio run -e lilygo-t-rgb -t upload`. See [Using a LilyGO T-RGB](#using-a-lilygo-t-rgb).
+
 The first build downloads the ESP32-S3 toolchain plus the [LovyanGFX](https://github.com/lovyan03/LovyanGFX) and [ArduinoJson](https://arduinojson.org/) libraries, so give it a few minutes. When it finishes, the display shows **Wi-Fi setup**, or **"Waiting for Mac"** if it already knows your Wi-Fi. 🎉
 
 > 💡 **Tip:** `pio device monitor` shows the board's serial log, including `Wi-Fi connected, IP …` and `mDNS: claude-status.local`.
@@ -314,6 +317,22 @@ The display then shows **Question → *chat title* → *the question***.
 > - Neither works for claude.ai open in a web browser.
 
 ---
+
+## Using a LilyGO T-RGB
+
+The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch, either revision) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. Touch isn't used; the **BOOT** button works as described above.
+
+1. Flash it over USB from source (the published installer and release files are for the Waveshare board):
+   ```bash
+   cd claude-status/firmware
+   pio run -e lilygo-t-rgb -t upload
+   ```
+   If the upload can't find the board, hold **BOOT**, tap **RST**, release **BOOT**, and run it again.
+2. Set up Wi-Fi from your phone and install the Mac helper exactly as for the Waveshare board (Option 2 step 3, or Option 3 step 4). Skip the firmware installer.
+
+The screen type is detected from the touch controller at start-up. If yours stays blank, force it by adding e.g. `-DTRGB_PANEL=LILYGO_T_RGB_2_8_INCHES` (or `LILYGO_T_RGB_2_1_INCHES_FULL_CIRCLE`, `…_HALF_CIRCLE`, `…_FULL_CIRCLE_V2`, `…_HALF_CIRCLE_V2`) to `build_flags` in the `lilygo-t-rgb` environment.
+
+Wi-Fi firmware updates from the Mac helper download the Waveshare release, so a T-RGB refuses them (`/info` reports `"board": "lilygo-t-rgb"`) and the updater reports that the update failed. To update a T-RGB, pull the repo and flash it over USB again. The panel driver in `claude-status/firmware/src/trgb/` is LilyGO's, under its MIT licence.
 
 ## Updating
 

@@ -1,4 +1,5 @@
-// Claude Code status display for the Waveshare ESP32-S3-LCD-1.28.
+// Claude Code status display for the Waveshare ESP32-S3-LCD-1.28 or the LilyGO T-RGB
+// (build with -e lilygo-t-rgb, see platformio.ini).
 //
 // The Mac bridge (../bridge) POSTs a JSON summary to http://claude-status.local/state.
 // When a session needs input the screen shows a full-screen alert; otherwise it shows
@@ -44,6 +45,8 @@ constexpr uint32_t RESET_HOLD_MS = 5000;                      // hold BOOT this 
 constexpr uint8_t RESET_POWER_CYCLES = 3;                     // ...or power it on this many times in a row
 constexpr uint32_t POWER_CYCLE_WINDOW_MS = 10000;             // each within this long of the last
 constexpr uint32_t STALE_MS = 30000;                          // no push for this long = Mac offline
+
+#ifndef BOARD_LILYGO_T_RGB
 
 // ---- Board pins (Waveshare wiki, non-touch version) ----
 constexpr int PIN_LCD_DC   = 8;
@@ -105,6 +108,95 @@ class LGFX : public lgfx::LGFX_Device {
 
 static LGFX lcd;
 static LGFX_Sprite frame(&lcd);
+
+constexpr const char *BOARD_NAME = "waveshare-s3-lcd128";
+static void showFrame() { frame.pushSprite(0, 0); }
+
+#else  // BOARD_LILYGO_T_RGB
+
+#include <esp_heap_caps.h>
+#include "trgb/LilyGo_RGBPanel.h"
+
+constexpr int PIN_BOOT = 0;
+
+// The T-RGB has a 480x480 ST7701S panel on the ESP32-S3's RGB interface; LilyGO's driver
+// (src/trgb, MIT) sets it up through the XL9555 I/O expander and picks the right init
+// sequence for the 2.1" or 2.8" board from the touch controller it finds. The UI is still
+// drawn into the 240x240 sprite and scaled up 2x with smoothing on the way to the panel.
+// To force a panel type, build with e.g. -DTRGB_PANEL=LILYGO_T_RGB_2_8_INCHES.
+class TRGBDisplay {
+  LilyGo_RGBPanel panel;
+  static constexpr int OUT = 480, BAND = 16;  // output rows per transfer
+  uint16_t *band = nullptr;
+
+  // Exact (floor) average of two RGB565 pixels.
+  static inline uint16_t avg(uint16_t a, uint16_t b) { return (a & b) + (((a ^ b) & 0xF7DE) >> 1); }
+
+ public:
+  void init() {
+#ifdef TRGB_PANEL
+    bool ok = panel.begin(TRGB_PANEL);
+#else
+    bool ok = panel.begin();
+#endif
+    if (!ok) Serial.println("T-RGB panel init failed");
+    band = (uint16_t *)heap_caps_malloc(OUT * BAND * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!band) band = (uint16_t *)heap_caps_malloc(OUT * BAND * 2, MALLOC_CAP_SPIRAM);
+  }
+
+  // 0-255, like LovyanGFX; the T-RGB backlight driver has 16 steps.
+  void setBrightness(uint8_t v) { panel.setBrightness(v ? max(1, (v * 16 + 127) / 255) : 0); }
+
+  void fillScreen(uint32_t) {  // only ever used to clear to black at start-up
+    if (!band) return;
+    memset(band, 0, OUT * BAND * 2);
+    for (int y = 0; y < OUT; y += BAND) panel.pushColors(0, y, OUT, y + BAND, band);
+  }
+
+  // Scales a 240x240 16-bit sprite to the full panel. Each source pixel becomes a 2x2 block
+  // of itself and its averages with the neighbours to the right and below.
+  void present(LGFX_Sprite &spr) {
+    const uint16_t *src = (const uint16_t *)spr.getBuffer();
+    if (!src || !band) return;
+    const int W = spr.width(), H = spr.height();  // 240 x 240
+    int row = 0;
+    for (int y = 0; y < H; y++) {
+      const uint16_t *r0 = src + y * W;
+      const uint16_t *r1 = src + (y + 1 < H ? y + 1 : y) * W;
+      uint16_t *o0 = band + row * OUT, *o1 = o0 + OUT;
+      for (int x = 0; x < W; x++) {
+        int xn = x + 1 < W ? x + 1 : x;
+        // LovyanGFX keeps 16-bit sprites byte-swapped; the RGB panel wants native order.
+        uint16_t a = __builtin_bswap16(r0[x]), b = __builtin_bswap16(r0[xn]);
+        uint16_t c = __builtin_bswap16(r1[x]), d = __builtin_bswap16(r1[xn]);
+        uint16_t ab = avg(a, b), ac = avg(a, c);
+        o0[2 * x] = a;
+        o0[2 * x + 1] = ab;
+        o1[2 * x] = ac;
+        o1[2 * x + 1] = avg(ab, avg(c, d));
+      }
+      row += 2;
+      if (row == BAND) {
+        int oy = 2 * y + 2 - BAND;
+        panel.pushColors(0, oy, OUT, oy + BAND, band);
+        row = 0;
+      }
+    }
+  }
+};
+
+static TRGBDisplay lcd;
+static LGFX_Sprite frame;
+
+constexpr const char *BOARD_NAME = "lilygo-t-rgb";
+static void showFrame() { lcd.present(frame); }
+
+// Firmware for other boards would boot but drive the wrong screen, so Wi-Fi updates only
+// accept images that carry this tag (every T-RGB build does, via this very string).
+static const char OTA_BOARD_TAG[] = "claude-monitor-board=lilygo-t-rgb;";
+#define REQUIRE_OTA_BOARD_TAG 1
+
+#endif  // BOARD_LILYGO_T_RGB
 static WebServer server(80);
 
 constexpr int CX = 120, CY = 120;
@@ -475,7 +567,7 @@ static void drawMessage(const char *title, const String &line, uint32_t ring) {
   frame.fillArc(CX, CY, 112, 119, 0, 360, ring);
   text(title, CX, 108, COL_TEXT, &fonts::FreeSansBold9pt7b);
   text(line, CX, 134, COL_DIM, &fonts::Font2);
-  frame.pushSprite(0, 0);
+  showFrame();
 }
 
 // ---- Pairing and firmware updates over Wi-Fi ----
@@ -487,6 +579,7 @@ static bool authorized() {
 static void handleInfo() {
   JsonDocument d;
   d["version"] = FW_VERSION;
+  d["board"] = BOARD_NAME;
   d["paired"] = pairKey.length() > 0;
   d["ip"] = WiFi.localIP().toString();
   String out;
@@ -519,11 +612,26 @@ static void drawUpdateProgress(int pct) {
   text("Updating", CX, 100, COL_TEXT, &fonts::FreeSansBold12pt7b);
   text(String(pct) + "%", CX, 128, COL_DIM, &fonts::FreeSansBold9pt7b);
   text("Don't unplug the display", CX, 156, COL_FAINT, &fonts::Font2);
-  frame.pushSprite(0, 0);
+  showFrame();
 }
 
 static bool otaAuthed = false, otaOk = false;
 static size_t otaTotal = 0;
+static String otaError;
+
+#ifdef REQUIRE_OTA_BOARD_TAG
+// Looks for OTA_BOARD_TAG anywhere in the incoming image, including across chunk boundaries.
+static size_t otaTagMatched = 0;
+static bool otaTagFound = false;
+static void scanForBoardTag(const uint8_t *buf, size_t len) {
+  const size_t n = sizeof(OTA_BOARD_TAG) - 1;
+  for (size_t i = 0; i < len && !otaTagFound; i++) {
+    char ch = (char)buf[i];
+    while (otaTagMatched && ch != OTA_BOARD_TAG[otaTagMatched]) otaTagMatched = 0;  // tag has no repeated prefix
+    if (ch == OTA_BOARD_TAG[otaTagMatched] && ++otaTagMatched == n) otaTagFound = true;
+  }
+}
+#endif
 
 // Called repeatedly while the firmware file streams in
 static void handleUpdateUpload() {
@@ -531,12 +639,20 @@ static void handleUpdateUpload() {
   if (up.status == UPLOAD_FILE_START) {
     otaAuthed = authorized();
     otaOk = false;
+    otaError = "";
+#ifdef REQUIRE_OTA_BOARD_TAG
+    otaTagMatched = 0;
+    otaTagFound = false;
+#endif
     if (!otaAuthed) return;
     otaTotal = server.header("X-Firmware-Size").toInt();
     drawUpdateProgress(0);
     otaOk = Update.begin(otaTotal ? otaTotal : UPDATE_SIZE_UNKNOWN);
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (!otaAuthed || !otaOk) return;
+#ifdef REQUIRE_OTA_BOARD_TAG
+    scanForBoardTag(up.buf, up.currentSize);
+#endif
     if (Update.write(up.buf, up.currentSize) != up.currentSize) otaOk = false;
     static uint32_t lastDraw = 0;
     if (otaTotal && millis() - lastDraw > 250) {
@@ -544,6 +660,13 @@ static void handleUpdateUpload() {
       drawUpdateProgress(min(99, (int)(100.0 * up.totalSize / otaTotal)));
     }
   } else if (up.status == UPLOAD_FILE_END) {
+#ifdef REQUIRE_OTA_BOARD_TAG
+    if (otaAuthed && otaOk && !otaTagFound) {
+      Update.abort();
+      otaOk = false;
+      otaError = String("this firmware isn't built for the ") + BOARD_NAME;
+    }
+#endif
     if (otaAuthed && otaOk) otaOk = Update.end(true);
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     Update.abort();
@@ -557,7 +680,8 @@ static void handleUpdateDone() {
     return;
   }
   if (!otaOk) {
-    server.send(500, "text/plain", String("Update failed: ") + Update.errorString() + "\n");
+    server.send(500, "text/plain",
+                String("Update failed: ") + (otaError.length() ? otaError : String(Update.errorString())) + "\n");
     drawMessage("Update failed", "Still on " FW_VERSION, COL_ERR);
     delay(2000);
     return;
@@ -695,7 +819,7 @@ void loop() {
     if (!connected) {
       if (!handleBootButton(false)) {
         drawWifiSetup();
-        frame.pushSprite(0, 0);
+        showFrame();
       }
       delay(15);
       return;
@@ -731,7 +855,7 @@ void loop() {
   bool alert = first && waitingKey() != dismissedKey;
   if (alert) drawAlert(*first, waiting - 1);
   else drawStatus(stale);
-  frame.pushSprite(0, 0);
+  showFrame();
 
   static int brightness = -1;
   int want = alert ? 255 : 150;
