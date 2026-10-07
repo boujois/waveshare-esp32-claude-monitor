@@ -57,6 +57,7 @@ DEFAULT_CONFIG = {
     "ci_passed_window": 600,  # seconds checks that passed stay on screen; 0 = while the session is open
     # Anthropic's public status page: incidents affecting Claude Code turn the display's ring red
     "status_page": True,
+    "cat": True,  # the tabby cat on the display; false for the plain status screen
 }
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -1227,6 +1228,7 @@ def main():
             "today": today.snapshot(),
             "usage": usage["data"],
             "tz": tz,
+            "cat": bool(cfg["cat"]),
         }
         # CI checks for the session open in the Claude app, even after you switch to another app
         if ci_checks:
