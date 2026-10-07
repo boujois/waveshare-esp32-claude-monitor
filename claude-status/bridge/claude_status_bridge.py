@@ -8,6 +8,7 @@ ESP32 status display over Wi-Fi:
   * "needs your input"     hook events POSTed to http://127.0.0.1:47823/hook
   * today's activity       token usage + prompt count from the session transcripts
   * plan limits (opt-in)   5-hour / weekly usage from Anthropic's OAuth usage endpoint
+  * CI checks              the pull request for the session open in the Claude app (GitHub CLI)
 
 Standard library only. Run directly or via the launchd agent (see install.sh).
 """
@@ -50,6 +51,9 @@ DEFAULT_CONFIG = {
     # it's waiting on you. Costs a sliver of plan usage per finished turn.
     "check_replies": True,
     "update_check_interval": 24 * 3600,  # how often to look for a new release on GitHub
+    # CI checks on the pull request for the session open in the Claude app, via the GitHub CLI
+    "ci_checks": True,
+    "ci_passed_window": 600,  # seconds checks that passed stay on screen; 0 = while the session is open
 }
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -717,6 +721,98 @@ class TodayStats:
 
 
 # ---------------------------------------------------------------------------
+# CI checks for the session open in the Claude app (GitHub CLI)
+# ---------------------------------------------------------------------------
+
+GH_CLI = shutil.which("gh") or next((p for p in ("/opt/homebrew/bin/gh", "/usr/local/bin/gh") if os.path.exists(p)), None)
+CI_ORDER = "PFCRQ"  # the display's ring order: passed, failed, cancelled, running, queued
+
+
+def check_letter(c):
+    """A check from `gh pr view --json statusCheckRollup` as one letter, or None if it was
+    skipped (a workflow that didn't apply to this pull request)."""
+    if c.get("__typename") == "StatusContext":
+        return {"SUCCESS": "P", "FAILURE": "F", "ERROR": "F"}.get(c.get("state"), "R")
+    if c.get("status") != "COMPLETED":
+        return "R" if c.get("status") == "IN_PROGRESS" else "Q"
+    return {"SUCCESS": "P", "NEUTRAL": "P", "SKIPPED": None, "CANCELLED": "C", "STALE": "C"}.get(c.get("conclusion"), "F")
+
+
+def pr_checks(cwd):
+    """The checks on the open pull request for the branch checked out in cwd, or None."""
+    try:
+        r = subprocess.run([GH_CLI, "pr", "view", "--json", "number,title,state,headRefOid,statusCheckRollup"],
+                           cwd=cwd, capture_output=True, text=True, timeout=30)
+        pr = json.loads(r.stdout) if r.returncode == 0 else {}
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None  # folder gone, gh missing or signed out, ...
+    if pr.get("state") != "OPEN":
+        return None  # no pull request for this branch, or it's merged or closed
+
+    latest = {}  # re-running a check adds another with the same name: keep the newest
+    for c in pr.get("statusCheckRollup") or []:
+        key = (c.get("workflowName") or "", c.get("name") or c.get("context") or "")
+        if key not in latest or (c.get("startedAt") or "") >= (latest[key].get("startedAt") or ""):
+            latest[key] = c
+    checks = sorted(((check_letter(c), c) for c in latest.values() if check_letter(c)),
+                    key=lambda lc: CI_ORDER.index(lc[0]))
+    if not checks:
+        return None
+    letters = "".join(letter for letter, _ in checks)
+    status = ("running" if "R" in letters or "Q" in letters else "failed" if "F" in letters
+              else "passed" if "P" in letters else "cancelled")
+    # The checks to name on the card, and when the run started (while running) or finished
+    named = "R" if status == "running" else "F" if status == "failed" else ""
+    detail = ", ".join(c.get("name") or c.get("context") or "" for letter, c in checks if letter in named)
+    times = [_epoch(c.get("startedAt" if status == "running" else "completedAt")) for _, c in checks]
+    times = [t for t in times if t]
+    since = (min(times) if status == "running" else max(times)) if times else 0
+    return {"title": ascii_text(f"#{pr['number']} {pr.get('title') or ''}"), "status": status, "checks": letters,
+            "detail": ascii_text(detail), "since": since,
+            "key": f"{pr['number']}:{(pr.get('headRefOid') or '')[:7]}:{status}"}
+
+
+class CIWatcher:
+    """CI checks for the session you have open in the Claude app, fetched in the background:
+    every 15 seconds while checks run, every minute otherwise, and straight away when you open
+    another session. Checks that passed show for passed_window seconds (0 = for as long as the
+    session is open); running and failed ones show until that changes."""
+
+    def __init__(self, passed_window):
+        self.passed_window = passed_window
+        self.cwd = None
+        self.result = (None, None)  # (folder, checks)
+        self.wake = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def watch(self, cwd):
+        """The folder of the session open in the Claude app, or None."""
+        if cwd != self.cwd:
+            self.cwd = cwd
+            self.wake.set()
+
+    def _run(self):
+        last_key = None
+        while True:
+            self.wake.clear()
+            cwd = self.cwd
+            checks = pr_checks(cwd) if cwd else None
+            self.result = (cwd, checks)
+            if checks and checks["key"] != last_key:
+                log(f"CI {checks['title'][:40]}: {checks['status']} {checks['checks']}")
+            last_key = checks and checks["key"]
+            self.wake.wait(15 if checks and checks["status"] == "running" else 60)
+
+    def snapshot(self):
+        cwd, checks = self.result
+        if not checks or cwd != self.cwd:
+            return None
+        if checks["status"] == "passed" and self.passed_window and time.time() - checks["since"] > self.passed_window:
+            return None
+        return checks
+
+
+# ---------------------------------------------------------------------------
 # Plan limits (opt-in)
 # ---------------------------------------------------------------------------
 
@@ -995,6 +1091,8 @@ def main():
     today = TodayStats()
     chats = ChatWatcher() if cfg["chat_alerts"] else None
     focus = FocusWatcher()
+    ci_checks = cfg["ci_checks"] and GH_CLI
+    ci = CIWatcher(cfg["ci_passed_window"]) if ci_checks and not args.once else None
     device = Device(cfg["device_host"])
     latest = {}
     usage = {"data": None, "next": 0}
@@ -1049,8 +1147,9 @@ def main():
             chats.update()
         # A finished session you're looking at in the Claude app doesn't need a Done card
         focused = focus.update()
+        live = read_live_sessions()
         if focused and (chats.was_front if chats else claude_app_in_front()):
-            for sid, d in read_live_sessions().items():
+            for sid, d in live.items():
                 if d.get("hostSessionId") == focused:
                     hooks.mark_done_seen(sid)
         hook_snap, _ = hooks.snapshot()
@@ -1062,6 +1161,15 @@ def main():
             "usage": usage["data"],
             "tz": tz,
         }
+        # CI checks for the session open in the Claude app, even after you switch to another app
+        if ci_checks:
+            sid = next((s for s, d in live.items() if focused and d.get("hostSessionId") == focused), None)
+            cwd = live[sid].get("cwd") if sid else None
+            if ci:
+                ci.watch(cwd)
+            checks = ci.snapshot() if ci else pr_checks(cwd) if cwd else None
+            if checks:
+                state["ci"] = {"id": sid[:8], **checks}
         # Offer an update when the helper or the display is behind the latest release
         tag = release["tag"]
         if tag and (is_newer(tag, helper_version()) or is_newer(tag, display["version"])
