@@ -344,7 +344,7 @@ From top to bottom:
 - **`5h 38%` / `wk 64%`:** the same usage as numbers, with the time left until each limit resets underneath.
 - **Headline:**
   - **`2 working`:** sessions are busy
-  - **`All done`** (green): everything has finished recently
+  - **`All done`** (green): sessions have finished; you'll usually see the green Done card instead
   - **`All idle`:** nothing is happening
   - **`1 waiting`** (pulsing orange): you dismissed an alert, but something still needs you
 - **Session list:** up to three active sessions, each with a dot (see the colour guide below).
@@ -369,6 +369,12 @@ If several sessions are waiting, the one that has waited longest is shown, and t
 
 <br clear="right">
 
+### The Done card
+
+When a Claude Code session finishes and doesn't need anything from you, the display shows a green **Done** card: a ✓, the session's name, a one-line summary of what it did (from the [reply check](#how-replies-that-need-you-are-spotted)), and how long ago it finished. The card stays until you send that session another message, so you can see at a glance that a task is finished. If several sessions have finished, the most recent is shown with `+N more`.
+
+Needs-input alerts always come first. If you'd rather finished sessions faded back to the status screen after a while, set `done_window` in `config.json`, for example `900` for 15 minutes.
+
 ### How replies that need you are spotted
 
 When a Claude Code turn ends, the helper reads Claude's final message:
@@ -384,7 +390,7 @@ The Haiku check needs the terminal `claude` command to be signed in, the same as
 |---|---|
 | 🟠 Orange dot (pulsing) | Session is working |
 | 🟠 Orange dot (solid) | Session is waiting for you |
-| 🟢 Green dot | Session finished in the last 15 minutes |
+| 🟢 Green card / dot | Session finished, and you haven't replied to it yet |
 | 🔴 Red dot | Session's last turn ended with an API error |
 | 🟡 Yellow ring | Usage is 75% or more |
 | 🔴 Red ring | Usage is 90% or more. Time to pace yourself! |
@@ -414,7 +420,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | `plan_usage_interval` | `300` | Seconds between plan usage checks |
 | `push_interval` | `1.0` | How often (seconds) the helper checks for changes |
 | `heartbeat_interval` | `10` | Push at least this often (seconds), even if nothing changed |
-| `done_window` | `900` | How long (seconds) a finished session shows as "done" (green) |
+| `done_window` | `0` | How long (seconds) a finished session shows as done (the green card). `0` keeps it until you reply |
 | `chat_alerts` | `true` | Alert on Claude app chats (tool approvals and connector questions) |
 | `check_replies` | `true` | When a Claude Code reply doesn't obviously ask for anything, ask Haiku whether it's waiting on you (see [How replies that need you are spotted](#how-replies-that-need-you-are-spotted)) |
 | `listen_port` | `47823` | Local port for hooks. If you change it, also update the URL in `hooks.py` and re-run `install.sh` |

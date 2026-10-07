@@ -43,7 +43,8 @@ DEFAULT_CONFIG = {
     "plan_usage_interval": 300,
     "push_interval": 1.0,
     "heartbeat_interval": 10,
-    "done_window": 15 * 60,  # show a session as "done" this long after it finishes
+    # Seconds a finished session stays "done" (the display's green pop-up); 0 = until you reply
+    "done_window": 0,
     "chat_alerts": True,  # alert on tool approval prompts in Claude app chats
     # When a reply doesn't obviously ask for anything, ask Haiku (via the `claude` CLI) whether
     # it's waiting on you. Costs a sliver of plan usage per finished turn.
@@ -121,18 +122,20 @@ _CLASSIFY_PROMPT = (
     "Reply with exactly one line:\n"
     "WAITING: <what the assistant needs from the user, under 70 characters>\n"
     "or\n"
-    "DONE\n"
+    "DONE: <what the assistant got done this turn, under 60 characters>\n"
     "Examples: 'After you approve, I will create the ticket.' -> WAITING: Approve creating the ticket. "
     "'Run the migration on staging and paste the output here.' -> WAITING: Run migration on staging, "
-    "paste output. 'After your PR merges, re-run the check; if it fails, merge develop.' -> DONE. "
-    "'All tests pass and the PR is merged.' -> DONE.")
+    "paste output. 'After your PR merges, re-run the check; if it fails, merge develop.' -> "
+    "DONE: Explained how to fix the failing npm-audit check. "
+    "'All tests pass and the PR is merged.' -> DONE: Tests pass, PR merged.")
 _classify_off_until = 0
 
 
-def classify_reply(text):
+def check_reply(text):
     """Asks Haiku (through the `claude` CLI, isolated: no tools, connectors, settings or hooks)
-    whether a reply is waiting on the user. Returns the short summary if it is, "" if not,
-    or None if the check couldn't run (e.g. the terminal `claude` isn't signed in)."""
+    whether a reply is waiting on the user. Returns ("waiting", what's needed) or
+    ("done", what was done), or None if the check couldn't run (e.g. the terminal
+    `claude` isn't signed in)."""
     global _classify_off_until
     if not text or time.time() < _classify_off_until:
         return None
@@ -152,9 +155,19 @@ def classify_reply(text):
         _classify_off_until = time.time() + 30 * 60  # don't retry every turn while it's broken
         return None
     answer = res.stdout.strip().splitlines()[0] if res.stdout.strip() else ""
+    detail = answer.split(":", 1)[1].strip() if ":" in answer else ""
     if answer.upper().startswith("WAITING"):
-        return answer.split(":", 1)[1].strip() if ":" in answer else "Claude is waiting for you"
-    return ""
+        return "waiting", detail or "Claude is waiting for you"
+    return "done", detail
+
+
+def classify_reply(text):
+    """The Haiku check reduced to: what the reply is waiting on you for, "" if it's
+    finished, or None if the check couldn't run."""
+    result = check_reply(text)
+    if result is None:
+        return None
+    return result[1] if result[0] == "waiting" else ""
 
 
 def waiting_request(text, use_classifier):
@@ -285,10 +298,12 @@ class HookState:
                 s["turn"] += 1  # invalidates any reply check still running for the last turn
                 w.clear()
                 s["done_at"] = 0
+                s["done_summary"] = ""
                 s["error"] = None
             elif name in ("Stop", "StopFailure"):
                 w.clear()
                 s["done_at"] = now
+                s["done_summary"] = ""
                 s["error"] = ascii_text(ev.get("error") or "API error", 60) if name == "StopFailure" else None
                 reply = ev.get("last_assistant_message") if name == "Stop" else None
                 question = ending_question(reply)
@@ -308,17 +323,23 @@ class HookState:
 
     def _check_reply(self, sid, reply, turn, since):
         """Runs the Haiku check off the hook thread; applies it only if you haven't
-        sent a new prompt in the meantime."""
-        request = classify_reply(reply)
-        if not request:
+        sent a new prompt in the meantime. A finished turn gets a one-line summary
+        for the display's "Done" pop-up."""
+        result = check_reply(reply)
+        if not result:
             return
+        kind, detail = result
         with self.lock:
             s = self.sessions.get(sid)
             if not s or s["turn"] != turn or "ended" in s["waiting"]:
                 return
-            s["waiting"]["ended"] = {"kind": "question", "detail": ascii_text(request, 120), "since": since}
+            if kind == "waiting":
+                s["waiting"]["ended"] = {"kind": "question", "detail": ascii_text(detail, 120), "since": since}
+            else:
+                s["done_summary"] = ascii_text(detail, 120)
             self.version += 1
-        log(f"{sid[:8]} reply is waiting on you: {request}")
+        if kind == "waiting":
+            log(f"{sid[:8]} reply is waiting on you: {detail}")
 
     def seed_from_transcripts(self, live, max_age=24 * 3600):
         """On startup, flag idle sessions whose last reply is waiting on you (their
@@ -399,8 +420,8 @@ def build_sessions(hooks, done_window, extra_rows=()):
             row.update(state="busy", since=int((d.get("statusUpdatedAt") or 0) / 1000))
         elif h.get("error"):
             row.update(state="error", detail=h["error"], since=int(h.get("done_at") or 0))
-        elif h.get("done_at") and now - h["done_at"] < done_window:
-            row.update(state="done", since=int(h["done_at"]))
+        elif h.get("done_at") and (not done_window or now - h["done_at"] < done_window):
+            row.update(state="done", detail=h.get("done_summary") or "", since=int(h["done_at"]))
         rows.append(row)
 
     # Sessions we only know about from hooks (e.g. not in the sessions dir) that need input

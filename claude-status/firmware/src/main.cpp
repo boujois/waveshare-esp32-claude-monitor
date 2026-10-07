@@ -373,6 +373,41 @@ static void drawAlert(const Session &s, int others) {
   text(foot, CX, 192, COL_FAINT, &fonts::Font2);
 }
 
+// Green card for a session that finished; stays until you reply to it.
+static void drawDone(const Session &s, int others) {
+  frame.fillScreen(COL_BG);
+  frame.fillArc(CX, CY, 106, 120, 0, 360, lerpColor(0x0F3D1E, COL_OK, 0.55f + 0.45f * pulse(4000)));
+
+  frame.fillSmoothCircle(CX, 56, 19, COL_OK);
+  frame.drawWedgeLine(CX - 9, 57, CX - 3, 63, 2.5, 2.5, COL_BG);  // check mark
+  frame.drawWedgeLine(CX - 3, 63, CX + 9, 50, 2.5, 2.5, COL_BG);
+
+  text("Done", CX, 96, COL_TEXT, &fonts::FreeSansBold12pt7b);
+
+  frame.setFont(&fonts::FreeSans9pt7b);
+  String l1, l2;
+  wrap2(s.name, 176, l1, l2);
+  text(l1, CX, 124, COL_DIM, &fonts::FreeSans9pt7b);
+  if (l2.length()) text(l2, CX, 144, COL_DIM, &fonts::FreeSans9pt7b);
+
+  // What it got done, when the helper's reply check provides a summary
+  const uint32_t COL_DONE_TEXT = 0x7EE2A0;
+  frame.setFont(&fonts::Font2);
+  if (l2.length()) {
+    text(fit(s.detail, 150), CX, 168, COL_DONE_TEXT, &fonts::Font2);
+  } else {
+    String d1, d2;
+    wrap2(s.detail, 160, d1, d2);
+    text(d1, CX, d2.length() ? 152 : 158, COL_DONE_TEXT, &fonts::Font2);
+    if (d2.length()) text(d2, CX, 168, COL_DONE_TEXT, &fonts::Font2);
+  }
+
+  time_t now = time(nullptr);
+  String foot = s.since && now > 1700000000 ? "finished " + duration(now - s.since) + " ago" : String("");
+  if (others > 0) foot += (foot.length() ? "  +" : "+") + String(others) + " more";
+  text(foot, CX, 192, COL_FAINT, &fonts::Font2);
+}
+
 static void drawStatus(bool stale) {
   frame.fillScreen(COL_BG);
   bool live = st.valid && !stale;
@@ -568,13 +603,14 @@ static void handleUpdateDone() {
   ESP.restart();
 }
 
-// Identifies the current set of waiting sessions, so a dismissal only lasts until something new happens.
-static String waitingKey() {
+// Identifies the current set of sessions in a state, so a dismissal only lasts until something new happens.
+static String stateKey(const char *state) {
   String k;
   for (const Session &s : st.sessions)
-    if (s.state == "waiting") k += s.name + "|" + String(s.since) + ";";
+    if (s.state == state) k += s.name + "|" + String(s.since) + ";";
   return k;
 }
+static String waitingKey() { return stateKey("waiting"); }
 
 // ---- Setup / loop ----
 
@@ -663,12 +699,12 @@ static void updatePowerCycleWindow() {
 }
 
 // BOOT: a short press dismisses the alert; holding it forgets Wi-Fi and restarts into setup.
-static bool handleBootButton(bool alertShowing) {
+static bool handleBootButton(const String &showingKey) {
   static uint32_t pressedAt = 0;
   bool down = digitalRead(PIN_BOOT) == LOW;
   if (down && !pressedAt) pressedAt = millis() | 1;
   if (!down && pressedAt) {
-    if (millis() - pressedAt < 1500 && alertShowing) dismissedKey = waitingKey();
+    if (millis() - pressedAt < 1500 && showingKey.length()) dismissedKey = showingKey;
     pressedAt = 0;
   }
   if (!pressedAt || millis() - pressedAt < 1500) return false;
@@ -693,7 +729,7 @@ void loop() {
   if (wifiManager.getConfigPortalActive()) {
     wifiManager.process();
     if (!connected) {
-      if (!handleBootButton(false)) {
+      if (!handleBootButton("")) {
         drawWifiSetup();
         frame.pushSprite(0, 0);
       }
@@ -717,19 +753,24 @@ void loop() {
   if (serverStarted) server.handleClient();
 
   bool stale = st.valid && millis() - st.rxMillis > STALE_MS;
-  const Session *first = nullptr;
+  const Session *first = nullptr, *firstDone = nullptr;
   int waiting = 0;
   if (!stale)
-    for (const Session &s : st.sessions)
+    for (const Session &s : st.sessions) {
       if (s.state == "waiting" && waiting++ == 0) first = &s;
+      if (s.state == "done" && !firstDone) firstDone = &s;  // the helper sends the newest first
+    }
 
-  if (handleBootButton(first != nullptr)) {
+  // Needs-input alerts come first; otherwise a finished session's green card, until you reply
+  bool alert = first && waitingKey() != dismissedKey;
+  bool done = !alert && firstDone && stateKey("done") != dismissedKey;
+  if (handleBootButton(alert ? waitingKey() : done ? stateKey("done") : String(""))) {
     delay(15);
     return;
   }
 
-  bool alert = first && waitingKey() != dismissedKey;
   if (alert) drawAlert(*first, waiting - 1);
+  else if (done) drawDone(*firstDone, st.done - 1);
   else drawStatus(stale);
   frame.pushSprite(0, 0);
 
