@@ -320,7 +320,7 @@ The display then shows **Question → *chat title* → *the question***.
 
 ## Using a LilyGO T-RGB
 
-The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch, either revision) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. Touch isn't used; the **BOOT** button works as described above.
+The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. Touch isn't used; the **BOOT** button works as described above.
 
 1. Flash it over USB from source (the published installer and release files are for the Waveshare board):
    ```bash
@@ -330,7 +330,7 @@ The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rg
    If the upload can't find the board, hold **BOOT**, tap **RST**, release **BOOT**, and run it again.
 2. Set up Wi-Fi from your phone and install the Mac helper exactly as for the Waveshare board (Option 2 step 3, or Option 3 step 4). Skip the firmware installer.
 
-The screen type is detected from the touch controller at start-up. If yours stays blank, force it by adding e.g. `-DTRGB_PANEL=LILYGO_T_RGB_2_8_INCHES` (or `LILYGO_T_RGB_2_1_INCHES_FULL_CIRCLE`, `…_HALF_CIRCLE`, `…_FULL_CIRCLE_V2`, `…_HALF_CIRCLE_V2`) to `build_flags` in the `lilygo-t-rgb` environment.
+The screen type is detected from the touch controller at start-up, but the newer revision of the 2.1" board (V2) can't be told apart from the original, so it gets the original's settings. If the screen is blank, tinted or the colours look wrong, force the type by adding e.g. `-DTRGB_PANEL=LILYGO_T_RGB_2_8_INCHES` (or `LILYGO_T_RGB_2_1_INCHES_FULL_CIRCLE`, `…_HALF_CIRCLE`, `…_FULL_CIRCLE_V2`, `…_HALF_CIRCLE_V2`) to `build_flags` in the `lilygo-t-rgb` environment.
 
 Wi-Fi firmware updates from the Mac helper download the Waveshare release, so a T-RGB refuses them (`/info` reports `"board": "lilygo-t-rgb"`) and the updater reports that the update failed. To update a T-RGB, pull the repo and flash it over USB again. The panel driver in `claude-status/firmware/src/trgb/` is LilyGO's, under its MIT licence.
 
