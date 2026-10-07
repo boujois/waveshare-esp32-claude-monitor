@@ -43,7 +43,8 @@ DEFAULT_CONFIG = {
     "plan_usage_interval": 300,
     "push_interval": 1.0,
     "heartbeat_interval": 10,
-    "done_window": 15 * 60,  # show a session as "done" this long after it finishes
+    # Seconds a finished session stays "done" (the display's green pop-up); 0 = until you reply
+    "done_window": 0,
     "chat_alerts": True,  # alert on tool approval prompts in Claude app chats
     # When a reply doesn't obviously ask for anything, ask Haiku (via the `claude` CLI) whether
     # it's waiting on you. Costs a sliver of plan usage per finished turn.
@@ -91,7 +92,9 @@ def ending_question(message):
     (the last sentence ending in "?", or a closing "let me know..." line)."""
     if not message:
         return None
-    text = re.sub(r"[*_`#>]+", "", message).strip()
+    text = re.sub(r"`[^`\n]*`", " ", message)  # inline code (e.g. `/login?next=`) isn't prose
+    text = re.sub(r"\?(?=[^\s\"')\]*_])", "", text)  # a "?" inside a URL or path doesn't end a question
+    text = re.sub(r"[*_`#>]+", "", text).strip()
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
     if not paragraphs:
         return None
@@ -121,18 +124,20 @@ _CLASSIFY_PROMPT = (
     "Reply with exactly one line:\n"
     "WAITING: <what the assistant needs from the user, under 70 characters>\n"
     "or\n"
-    "DONE\n"
+    "DONE: <what the assistant got done this turn, under 60 characters>\n"
     "Examples: 'After you approve, I will create the ticket.' -> WAITING: Approve creating the ticket. "
     "'Run the migration on staging and paste the output here.' -> WAITING: Run migration on staging, "
-    "paste output. 'After your PR merges, re-run the check; if it fails, merge develop.' -> DONE. "
-    "'All tests pass and the PR is merged.' -> DONE.")
+    "paste output. 'After your PR merges, re-run the check; if it fails, merge develop.' -> "
+    "DONE: Explained how to fix the failing npm-audit check. "
+    "'All tests pass and the PR is merged.' -> DONE: Tests pass, PR merged.")
 _classify_off_until = 0
 
 
-def classify_reply(text):
+def check_reply(text):
     """Asks Haiku (through the `claude` CLI, isolated: no tools, connectors, settings or hooks)
-    whether a reply is waiting on the user. Returns the short summary if it is, "" if not,
-    or None if the check couldn't run (e.g. the terminal `claude` isn't signed in)."""
+    whether a reply is waiting on the user. Returns ("waiting", what's needed) or
+    ("done", what was done), or None if the check couldn't run (e.g. the terminal
+    `claude` isn't signed in)."""
     global _classify_off_until
     if not text or time.time() < _classify_off_until:
         return None
@@ -152,9 +157,19 @@ def classify_reply(text):
         _classify_off_until = time.time() + 30 * 60  # don't retry every turn while it's broken
         return None
     answer = res.stdout.strip().splitlines()[0] if res.stdout.strip() else ""
+    detail = answer.split(":", 1)[1].strip() if ":" in answer else ""
     if answer.upper().startswith("WAITING"):
-        return answer.split(":", 1)[1].strip() if ":" in answer else "Claude is waiting for you"
-    return ""
+        return "waiting", detail or "Claude is waiting for you"
+    return "done", detail
+
+
+def classify_reply(text):
+    """The Haiku check reduced to: what the reply is waiting on you for, "" if it's
+    finished, or None if the check couldn't run."""
+    result = check_reply(text)
+    if result is None:
+        return None
+    return result[1] if result[0] == "waiting" else ""
 
 
 def waiting_request(text, use_classifier):
@@ -197,6 +212,24 @@ def last_turn_reply(session_id, tail_bytes=512 * 1024):
                 when = time.time()
             return text, when
     return None, 0
+
+
+_ACK_WORDS = {"thanks", "thank", "you", "thx", "ty", "ta", "cheers", "ok", "okay", "k", "great", "cool",
+              "nice", "perfect", "awesome", "brilliant", "lovely", "excellent", "good", "sounds", "looks",
+              "done", "got", "it", "lgtm", "yep", "yes", "sure", "fine", "noted", "much", "very", "so",
+              "all", "that's", "thats", "amazing", "superb", "wonderful"}
+
+
+def is_acknowledgement(prompt):
+    """True for short replies like "thanks!", "ok great", "👍" that just acknowledge
+    a finished task, so Claude's answer to them shouldn't pop up another Done card."""
+    text = (prompt or "").strip().lower()
+    if not text or len(text) > 40:
+        return False
+    words = re.findall(r"[a-z']+", text)
+    if not words:  # emoji-only, e.g. 👍 or 🙏
+        return bool(re.fullmatch(r"[^\w\s]{1,6}", text.replace(" ", "")))
+    return all(w in _ACK_WORDS for w in words)
 
 
 class HookState:
@@ -285,10 +318,15 @@ class HookState:
                 s["turn"] += 1  # invalidates any reply check still running for the last turn
                 w.clear()
                 s["done_at"] = 0
+                s["done_summary"] = ""
+                s["done_seen"] = False
+                s["ack"] = is_acknowledgement(ev.get("prompt"))
                 s["error"] = None
             elif name in ("Stop", "StopFailure"):
                 w.clear()
                 s["done_at"] = now
+                s["done_summary"] = ""
+                s["done_seen"] = bool(s.get("ack"))  # the reply to a "thanks" needs no Done card
                 s["error"] = ascii_text(ev.get("error") or "API error", 60) if name == "StopFailure" else None
                 reply = ev.get("last_assistant_message") if name == "Stop" else None
                 question = ending_question(reply)
@@ -308,17 +346,23 @@ class HookState:
 
     def _check_reply(self, sid, reply, turn, since):
         """Runs the Haiku check off the hook thread; applies it only if you haven't
-        sent a new prompt in the meantime."""
-        request = classify_reply(reply)
-        if not request:
+        sent a new prompt in the meantime. A finished turn gets a one-line summary
+        for the display's "Done" pop-up."""
+        result = check_reply(reply)
+        if not result:
             return
+        kind, detail = result
         with self.lock:
             s = self.sessions.get(sid)
             if not s or s["turn"] != turn or "ended" in s["waiting"]:
                 return
-            s["waiting"]["ended"] = {"kind": "question", "detail": ascii_text(request, 120), "since": since}
+            if kind == "waiting":
+                s["waiting"]["ended"] = {"kind": "question", "detail": ascii_text(detail, 120), "since": since}
+            else:
+                s["done_summary"] = ascii_text(detail, 120)
             self.version += 1
-        log(f"{sid[:8]} reply is waiting on you: {request}")
+        if kind == "waiting":
+            log(f"{sid[:8]} reply is waiting on you: {detail}")
 
     def seed_from_transcripts(self, live, max_age=24 * 3600):
         """On startup, flag idle sessions whose last reply is waiting on you (their
@@ -339,6 +383,15 @@ class HookState:
                         self.version += 1
                     log(f"{sid[:8]} last reply is waiting on you - flagging it")
         threading.Thread(target=run, daemon=True).start()
+
+    def mark_done_seen(self, sid):
+        """You're looking at this session in the Claude app, so its Done card can go."""
+        with self.lock:
+            s = self.sessions.get(sid)
+            if s and s.get("done_at") and not s.get("done_seen"):
+                s["done_seen"] = True
+                self.version += 1
+                log(f"{sid[:8]} finished session viewed - clearing its Done card")
 
     def snapshot(self):
         with self.lock:
@@ -399,8 +452,8 @@ def build_sessions(hooks, done_window, extra_rows=()):
             row.update(state="busy", since=int((d.get("statusUpdatedAt") or 0) / 1000))
         elif h.get("error"):
             row.update(state="error", detail=h["error"], since=int(h.get("done_at") or 0))
-        elif h.get("done_at") and now - h["done_at"] < done_window:
-            row.update(state="done", since=int(h["done_at"]))
+        elif h.get("done_at") and not h.get("done_seen") and (not done_window or now - h["done_at"] < done_window):
+            row.update(state="done", detail=h.get("done_summary") or "", since=int(h["done_at"]))
         rows.append(row)
 
     # Sessions we only know about from hooks (e.g. not in the sessions dir) that need input
@@ -420,6 +473,53 @@ def build_sessions(hooks, done_window, extra_rows=()):
 # ---------------------------------------------------------------------------
 # Claude app chats: connector/tool approval prompts
 # ---------------------------------------------------------------------------
+
+CLAUDE_APP_ID = "com.anthropic.claudefordesktop"
+
+
+def claude_app_in_front():
+    try:
+        front = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=5).stdout.strip()
+        info = subprocess.run(["lsappinfo", "info", "-only", "bundleid", front],
+                              capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return CLAUDE_APP_ID in info
+
+
+class FocusWatcher:
+    """Which Claude Code session is open in the Claude app, from the app's log
+    ("LocalSessions.setFocusedSession: sessionId=local_..."). Session files link
+    that ID through their hostSessionId. Internal app log, so it may change."""
+
+    LOG = Path.home() / "Library/Logs/Claude/main.log"
+    PATTERN = re.compile(r"setFocusedSession: sessionId=(\S+)")
+
+    def __init__(self):
+        self.focused = None
+        self.offset = None
+        self.inode = None
+
+    def update(self):
+        try:
+            st = self.LOG.stat()
+        except OSError:
+            return self.focused
+        if self.offset is None or st.st_ino != self.inode or st.st_size < self.offset:
+            # first run: look back a little for the session that's open right now
+            self.offset = max(0, st.st_size - 256 * 1024) if self.offset is None else 0
+            self.inode = st.st_ino
+        if st.st_size > self.offset:
+            with open(self.LOG, "rb") as fh:
+                fh.seek(self.offset)
+                chunk = fh.read()
+            end = chunk.rfind(b"\n")
+            if end >= 0:
+                self.offset += end + 1
+                for m in self.PATTERN.finditer(chunk[: end + 1].decode("utf-8", "replace")):
+                    self.focused = None if m.group(1) == "null" else m.group(1)
+        return self.focused
+
 
 class ChatWatcher:
     """Tracks Claude app chats that are waiting for you:
@@ -471,13 +571,7 @@ class ChatWatcher:
         return chunk[: end + 1].decode("utf-8", "replace").splitlines()
 
     def _claude_in_front(self):
-        try:
-            front = subprocess.run(["lsappinfo", "front"], capture_output=True, text=True, timeout=5).stdout.strip()
-            info = subprocess.run(["lsappinfo", "info", "-only", "bundleid", front],
-                                  capture_output=True, text=True, timeout=5).stdout
-        except (OSError, subprocess.TimeoutExpired):
-            return False
-        return self.APP_ID in info
+        return claude_app_in_front()
 
     def update(self):
         now = time.time()
@@ -900,6 +994,7 @@ def main():
     hooks = HookState(classify=cfg["check_replies"])
     today = TodayStats()
     chats = ChatWatcher() if cfg["chat_alerts"] else None
+    focus = FocusWatcher()
     device = Device(cfg["device_host"])
     latest = {}
     usage = {"data": None, "next": 0}
@@ -952,6 +1047,12 @@ def main():
 
         if chats:
             chats.update()
+        # A finished session you're looking at in the Claude app doesn't need a Done card
+        focused = focus.update()
+        if focused and (chats.was_front if chats else claude_app_in_front()):
+            for sid, d in read_live_sessions().items():
+                if d.get("hostSessionId") == focused:
+                    hooks.mark_done_seen(sid)
         hook_snap, _ = hooks.snapshot()
         rows, counts = build_sessions(hook_snap, cfg["done_window"], chats.rows() if chats else ())
         state = {
