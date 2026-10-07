@@ -364,6 +364,12 @@ static String dismissedCI;                      // the CI card's key when you la
 static bool tapReady = false;                   // the motion sensor was found, so taps on the case work
 static WiFiManager wifiManager;
 static Preferences prefs;
+#ifdef BOARD_LILYGO_T_RGB
+constexpr uint8_t DEFAULT_BRIGHTNESS = 204;  // 80%: the T-RGB's backlight is dimmer
+#else
+constexpr uint8_t DEFAULT_BRIGHTNESS = 150;
+#endif
+static int idleBrightness = DEFAULT_BRIGHTNESS;  // normal screens; alerts are always full brightness
 static String currentTz;
 static uint8_t powerCycles = 0;  // consecutive quick power-ons, for the no-button Wi-Fi reset
 static String pairKey;           // shared with the Mac helper; required for firmware updates
@@ -454,6 +460,17 @@ static void handleWhiteBalance() {
   server.send(200, "text/plain", "white balance r=" + String(wb[0]) + " g=" + String(wb[1]) + " b=" + String(wb[2]) + "\n");
 }
 #endif
+
+// GET shows the brightness of the normal screens (alerts are always full); POST /brightness?level=80
+// (percent) changes and saves it.
+static void handleBrightness() {
+  if (server.method() == HTTP_POST && server.hasArg("level")) {
+    int pct = constrain(server.arg("level").toInt(), 5, 100);
+    idleBrightness = (pct * 255 + 50) / 100;
+    prefs.putUChar("bright", idleBrightness);
+  }
+  server.send(200, "text/plain", "brightness " + String((idleBrightness * 100 + 127) / 255) + "%\n");
+}
 
 static void handleWifiReset() {
   server.send(200, "text/plain", "Forgetting Wi-Fi and restarting into Wi-Fi setup\n");
@@ -1111,6 +1128,7 @@ void setup() {
 #endif
 
   prefs.begin("claude-status", false);
+  idleBrightness = prefs.getUChar("bright", DEFAULT_BRIGHTNESS);
 #ifdef BOARD_LILYGO_T_RGB
   lcd.setWhiteBalance(prefs.getUChar("wbR", TRGB_WB_R), prefs.getUChar("wbG", TRGB_WB_G), prefs.getUChar("wbB", TRGB_WB_B));
 #endif
@@ -1145,6 +1163,7 @@ void setup() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/screen.bmp", HTTP_GET, handleScreenshot);
   server.on("/wifi/reset", HTTP_POST, handleWifiReset);
+  server.on("/brightness", handleBrightness);
 #ifdef BOARD_LILYGO_T_RGB
   server.on("/whitebalance", handleWhiteBalance);
 #endif
@@ -1277,7 +1296,7 @@ void loop() {
   showFrame();
 
   static int brightness = -1;
-  int want = card.alert && !diagnosticsSince ? 255 : 150;
+  int want = card.alert && !diagnosticsSince ? 255 : idleBrightness;
   if (want != brightness) lcd.setBrightness(brightness = want);
 
   delay(15);
