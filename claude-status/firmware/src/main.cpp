@@ -134,14 +134,42 @@ class TRGBDisplay {
 
  public:
   void init() {
-#ifdef TRGB_PANEL
-    bool ok = panel.begin(TRGB_PANEL);
+#ifdef TRGB_BGR
+    constexpr LilyGo_RGBPanel_Color_Order order = LILYGO_T_RGB_ORDER_BGR;
 #else
-    bool ok = panel.begin();
+    constexpr LilyGo_RGBPanel_Color_Order order = LILYGO_T_RGB_ORDER_RGB;
+#endif
+#ifdef TRGB_PANEL
+    bool ok = panel.begin(TRGB_PANEL, order);
+#else
+    bool ok = panel.begin(order);
 #endif
     if (!ok) Serial.println("T-RGB panel init failed");
+    Serial.printf("T-RGB: touch %s, model %d\n", panel.getTouchModelName(), (int)panel.getModel());
     band = (uint16_t *)heap_caps_malloc(OUT * BAND * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     if (!band) band = (uint16_t *)heap_caps_malloc(OUT * BAND * 2, MALLOC_CAP_SPIRAM);
+  }
+
+  const char *touchName() { return panel.getTouchModelName(); }
+  int model() { return (int)panel.getModel(); }
+
+  // Diagnostic (build with -DTRGB_TEST_PATTERN): six colour stripes. The left half is written
+  // straight to the panel as plain RGB565; the right half goes through the sprite like the UI.
+  void testPattern(LGFX_Sprite &spr) {
+    static const uint32_t cols[6] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF, 0xA6AEBF, 0x0B0F1A};
+    for (int i = 0; i < 6; i++) spr.fillRect(0, i * 40, 240, 40, cols[i]);
+    spr.setTextDatum(textdatum_t::middle_center);
+    spr.setFont(&fonts::Font2);
+    spr.setTextColor(0xFFFFFF);
+    spr.drawString(String("touch ") + touchName() + "  model " + String(model()), 180, 220);
+    present(spr);
+    if (!band) return;
+    for (int i = 0; i < 6; i++) {
+      uint32_t c = cols[i];
+      uint16_t v = ((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c & 0xFF) >> 3);  // RGB888 -> RGB565
+      for (int k = 0; k < 240 * BAND; k++) band[k] = v;
+      for (int y = i * 80; y < (i + 1) * 80; y += BAND) panel.pushColors(0, y, 240, y + BAND, band);
+    }
   }
 
   // 0-255, like LovyanGFX; the T-RGB backlight driver has 16 steps.
@@ -716,6 +744,14 @@ void setup() {
     Serial.println("Sprite allocation failed");
     while (true) delay(1000);
   }
+#if defined(BOARD_LILYGO_T_RGB) && defined(TRGB_TEST_PATTERN)
+  lcd.setBrightness(255);
+  lcd.testPattern(frame);
+  for (int i = 0; i < 60; i++) {  // keep it up for a minute, repeating the log line for late monitors
+    Serial.printf("T-RGB: touch %s, model %d\n", lcd.touchName(), lcd.model());
+    delay(1000);
+  }
+#endif
 
   prefs.begin("claude-status", false);
   pairKey = prefs.getString("key", "");
