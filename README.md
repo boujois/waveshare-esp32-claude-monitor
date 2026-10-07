@@ -9,9 +9,9 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
   &nbsp;
   <img src="docs/images/alert-question.png" width="200" alt="Question alert: Claude is asking a question in the 'Write release notes' session">
   &nbsp;
-  <img src="docs/images/status.png" width="200" alt="Status screen: time, plan usage rings with pace ticks, '3 working' and a list of sessions with timers">
+  <img src="docs/images/status.png" width="200" alt="Status screen: time, plan usage rings with pace ticks, the cat typing beside '3 working', and a list of sessions with timers">
   &nbsp;
-  <img src="docs/images/status-high-usage.png" width="200" alt="Status screen with high usage: rings turn yellow and red">
+  <img src="docs/images/status-high-usage.png" width="200" alt="Status screen with high usage: rings turn yellow and red, and the cat cheers beside 'All done'">
 </p>
 
 <p align="center"><sub>Real screenshots, grabbed straight off the device (with made-up session names).</sub></p>
@@ -57,6 +57,7 @@ The alert clears itself as soon as you respond, so you don't need to touch the d
 - 🕐 The current time
 - 🔶 **5-hour plan usage** (outer ring) and 🔷 **weekly plan usage** (inner ring), each with a countdown to its reset and a tick showing whether you're on pace
 - **How many sessions are working**, plus up to three active ones, each with a status dot and how long it's been working
+- 🐱 **A little tabby cat** beside the headline, acting out what's going on: typing while sessions work, waving when something needs you, cheering when they've finished, and curled up asleep when nothing's happening
 - 📊 **Today's activity**: prompts sent and tokens processed, across every session
 - 🔴 **Anthropic incidents**: when [Anthropic's status page](https://status.claude.com) reports a problem with Claude Code, the API or claude.ai, a red ring and the incident's name take the place of your plan usage, so you can tell when errors are on Anthropic's side
 
@@ -348,7 +349,7 @@ From top to bottom:
 - **Rings:** the outer 🔶 ring is your 5-hour plan usage and the inner 🔷 ring is weekly usage. They fill clockwise from 12 o'clock. The small white **tick** on each ring shows how much of that window has gone by. If the coloured arc is past its tick, you're using your plan faster than it lasts. While Anthropic has an incident affecting Claude Code, the API or claude.ai, the usage rings make way for a pulsing **red** ring, and *Anthropic incident* shows where the usage numbers were, with the incident's name scrolling underneath, e.g. *Elevated errors for Claude Opus 5.5*. Red error dots are then most likely Anthropic's problem, not yours.
 - **Time:** the current time, kept in sync over the internet (NTP).
 - **`5h 38%` / `wk 64%`:** the same usage as numbers, with the time left until each limit resets underneath. When you're ahead of the tick, it shows in yellow when you'd run out at this pace instead: `out 16:40`, or `out Fri` for the weekly limit.
-- **Headline:**
+- **Headline**, with [the cat](#the-cat) acting it out beside it:
   - **`2 working`:** sessions are busy
   - **`All done`** (green): sessions have finished; you'll usually see the green Done card instead
   - **`All idle`:** nothing is happening
@@ -357,6 +358,24 @@ From top to bottom:
 - **Footer:** today's prompt count and total tokens processed, across all sessions.
 
 <br clear="right">
+
+### The cat
+
+<p align="center"><img src="docs/images/cat-moods.png" width="560" alt="The cat's five moods: typing at a keyboard, waving a paw, cheering with its paws in the air, seeing stars, and curled up asleep"></p>
+
+A brown tabby sits beside the headline on the status screen and acts out what your sessions are up to:
+
+| The cat is… | When |
+|---|---|
+| ⌨️ **Typing** | Sessions are working (`2 working`). The more there are, the faster it types. |
+| 👋 **Waving** | Something still needs you after you hid its alert (`1 waiting`) |
+| 🎉 **Cheering** | Sessions have finished and you haven't replied yet (`All done`) |
+| 💫 **Seeing stars** | A session's last turn ended with an API error, and nothing is working or waiting |
+| 💤 **Asleep** | Nothing is happening (`All idle`), or the display hasn't heard from your Mac |
+
+When the display powers on, the cat walks across the empty screen before anything else appears.
+
+Prefer the plain status screen? Set `"cat": false` in the helper's `config.json` (see [Configuration](#configuration)). The display remembers it, so the walk at power-on stops too.
 
 ### The alert screen
 
@@ -432,7 +451,7 @@ The Haiku check needs the terminal `claude` command to be signed in, the same as
 ### Other screens
 
 - **Waiting for Mac:** the display has never heard from the helper since it powered on. It shows its IP address and `claude-status.local` to help with debugging.
-- **Mac offline:** nothing has arrived for 30 seconds. Your Mac might be asleep, or the helper might have stopped.
+- **Mac offline:** nothing has arrived for 30 seconds. Your Mac might be asleep, or the helper might have stopped. The cat naps on both of these screens until the Mac is back.
 - **Wi-Fi setup:** the display has no saved Wi-Fi, or can't reach it. Join `Claude-Monitor-Setup` from your phone. See [Option 2, step 2](#2-connect-the-display-to-your-wi-fi) for how to bring this screen back to change networks.
 - **Diagnostics:** tap the case **5 times** quickly. It shows the firmware version, the Wi-Fi network and its signal strength, the IP address and name, when the Mac last sent an update, and how long the display has been on. The ring counts down for 30 seconds, then it closes by itself. Double-tap to close it sooner.
 
@@ -461,6 +480,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | `ci_checks` | `true` | Show the [CI card](#the-ci-card) for the session you have open in the Claude app. Needs the GitHub CLI (`gh`), signed in |
 | `ci_passed_window` | `600` | How long (seconds) checks that passed stay on screen. `0` keeps them while the session is open |
 | `status_page` | `true` | Check [Anthropic's status page](https://status.claude.com) every 2 minutes, and turn the ring red during incidents affecting Claude Code, the API or claude.ai |
+| `cat` | `true` | Show [the cat](#the-cat). `false` brings back the plain status screen, and the display stops walking the cat across at power-on |
 | `listen_port` | `47823` | Local port for hooks. If you change it, also update the URL in `hooks.py` and re-run `install.sh` |
 
 ### Firmware: top of `claude-status/firmware/src/main.cpp`
@@ -672,6 +692,7 @@ python3 designs.py        # writes designs/*.stl and prints fit, stability and o
 │       ├── platformio.ini
 │       └── src/
 │           ├── main.cpp
+│           ├── cat.cpp / .h         # the tabby on the status screen: pixel-art poses and animations
 │           ├── taps.cpp / .h        # taps on the case (double tap, 5 taps), via the motion sensor
 │           └── secrets.h.example
 ├── tools/build-release.sh           # builds dist/: firmware, Mac zip, installer page
