@@ -118,6 +118,7 @@ static LGFX_Sprite frame(&lcd);
 
 constexpr const char *BOARD_NAME = "waveshare-s3-lcd128";
 static void showFrame() { frame.pushSprite(0, 0); }
+static uint32_t touchCount() { return 0; }  // no touch screen: wake from night hours with a double tap
 
 #else  // BOARD_LILYGO_T_RGB
 
@@ -272,7 +273,7 @@ static void showFrame() { lcd.present(frame); }
 // the run is over), and the fifth touch of a run counts as five taps straight away.
 namespace touchtaps {
 constexpr uint32_t POLL_MS = 10, GAP_MIN = 60, GAP_MAX = 450;
-volatile uint32_t doubles = 0, fives = 0;
+volatile uint32_t doubles = 0, fives = 0, touches = 0;
 
 void watch(void *) {
   bool wasDown = false;
@@ -283,6 +284,7 @@ void watch(void *) {
     if (down && !wasDown && (run == 0 || now - lastTap >= GAP_MIN)) {
       run = (run && now - lastTap <= GAP_MAX) ? run + 1 : 1;
       lastTap = now;
+      touches = touches + 1;
       if (run == 5) fives = fives + 1;
     }
     wasDown = down;
@@ -300,6 +302,7 @@ bool tapsBegin(float) {
 }
 uint32_t doubleTapCount() { return touchtaps::doubles; }
 uint32_t fiveTapCount() { return touchtaps::fives; }
+static uint32_t touchCount() { return touchtaps::touches; }  // every touch, for waking from night hours
 
 // Firmware for other boards would boot but drive the wrong screen, so Wi-Fi updates only
 // accept images that carry this tag (every T-RGB build does, via this very string).
@@ -370,6 +373,36 @@ constexpr uint8_t DEFAULT_BRIGHTNESS = 204;  // 80%: the T-RGB's backlight is di
 constexpr uint8_t DEFAULT_BRIGHTNESS = 150;
 #endif
 static int idleBrightness = DEFAULT_BRIGHTNESS;  // normal screens; alerts are always full brightness
+
+// Night hours: the backlight is off between these times (minutes after midnight, local time)
+// unless Claude needs you. A tap wakes the screen for WAKE_MS. Equal times turn it off.
+constexpr int DEFAULT_NIGHT_FROM = 23 * 60, DEFAULT_NIGHT_TO = 7 * 60;
+constexpr uint32_t WAKE_MS = 60000;
+static int nightFrom = DEFAULT_NIGHT_FROM, nightTo = DEFAULT_NIGHT_TO;
+
+static bool nightNow() {
+  if (nightFrom == nightTo) return false;
+  time_t now = time(nullptr);
+  if (now < 1700000000) return false;  // no clock yet
+  struct tm t;
+  localtime_r(&now, &t);
+  int m = t.tm_hour * 60 + t.tm_min;
+  return nightFrom < nightTo ? (m >= nightFrom && m < nightTo) : (m >= nightFrom || m < nightTo);
+}
+
+static String hhmm(int m) {
+  char b[6];
+  snprintf(b, sizeof(b), "%02d:%02d", m / 60, m % 60);
+  return b;
+}
+
+static int parseHHMM(const String &v) {  // "23:00" or "23" -> minutes, or -1
+  int colon = v.indexOf(':');
+  int h = (colon < 0 ? v : v.substring(0, colon)).toInt();
+  int m = colon < 0 ? 0 : v.substring(colon + 1).toInt();
+  if (v.length() == 0 || h < 0 || h > 23 || m < 0 || m > 59) return -1;
+  return h * 60 + m;
+}
 static String currentTz;
 static uint8_t powerCycles = 0;  // consecutive quick power-ons, for the no-button Wi-Fi reset
 static String pairKey;           // shared with the Mac helper; required for firmware updates
@@ -470,6 +503,30 @@ static void handleBrightness() {
     prefs.putUChar("bright", idleBrightness);
   }
   server.send(200, "text/plain", "brightness " + String((idleBrightness * 100 + 127) / 255) + "%\n");
+}
+
+// GET shows the night hours; POST /sleep?from=23:00&to=07:00 changes and saves them, POST /sleep?off=1
+// turns them off.
+static void handleSleep() {
+  if (server.method() == HTTP_POST) {
+    if (server.hasArg("off")) {
+      nightFrom = nightTo = 0;
+    } else {
+      int from = server.hasArg("from") ? parseHHMM(server.arg("from")) : nightFrom;
+      int to = server.hasArg("to") ? parseHHMM(server.arg("to")) : nightTo;
+      if (from < 0 || to < 0) {
+        server.send(400, "text/plain", "Use times like from=23:00&to=07:00\n");
+        return;
+      }
+      nightFrom = from;
+      nightTo = to;
+    }
+    prefs.putUShort("nightFrom", nightFrom);
+    prefs.putUShort("nightTo", nightTo);
+  }
+  server.send(200, "text/plain",
+              nightFrom == nightTo ? String("night hours off\n")
+                                   : "night hours " + hhmm(nightFrom) + "-" + hhmm(nightTo) + (nightNow() ? " (now)\n" : "\n"));
 }
 
 static void handleWifiReset() {
@@ -1129,6 +1186,8 @@ void setup() {
 
   prefs.begin("claude-status", false);
   idleBrightness = prefs.getUChar("bright", DEFAULT_BRIGHTNESS);
+  nightFrom = prefs.getUShort("nightFrom", DEFAULT_NIGHT_FROM);
+  nightTo = prefs.getUShort("nightTo", DEFAULT_NIGHT_TO);
 #ifdef BOARD_LILYGO_T_RGB
   lcd.setWhiteBalance(prefs.getUChar("wbR", TRGB_WB_R), prefs.getUChar("wbG", TRGB_WB_G), prefs.getUChar("wbB", TRGB_WB_B));
 #endif
@@ -1164,6 +1223,7 @@ void setup() {
   server.on("/screen.bmp", HTTP_GET, handleScreenshot);
   server.on("/wifi/reset", HTTP_POST, handleWifiReset);
   server.on("/brightness", handleBrightness);
+  server.on("/sleep", handleSleep);
 #ifdef BOARD_LILYGO_T_RGB
   server.on("/whitebalance", handleWhiteBalance);
 #endif
@@ -1269,6 +1329,26 @@ void loop() {
   // closes them, or otherwise dismisses the card on screen
   static uint32_t doubles = 0, fives = 0, diagnosticsSince = 0;
   uint32_t d = doubleTapCount(), f = fiveTapCount();
+
+  // Night hours: the screen sleeps unless Claude needs you. Any tap (or BOOT) wakes it, and the
+  // gesture that woke it doesn't also dismiss a card or open diagnostics.
+  static uint32_t touches = touchCount(), wokeAt = 0, swallowUntil = 0;
+  uint32_t t = touchCount();
+  bool poked = pressed || d != doubles || f != fives || t != touches;
+  touches = t;
+  bool night = nightNow();
+  bool asleep = night && !(wokeAt && millis() - wokeAt < WAKE_MS);
+  if (night && poked) {
+    if (asleep) swallowUntil = millis() + 1000;  // a double tap is only counted once its run ends
+    wokeAt = millis() | 1;
+    asleep = false;
+  }
+  if ((int32_t)(swallowUntil - millis()) > 0) {
+    pressed = false;
+    doubles = d;
+    fives = f;
+  }
+
   bool dismiss = pressed || d != doubles;
   if (f != fives) {
     diagnosticsSince = millis() | 1;
@@ -1296,7 +1376,7 @@ void loop() {
   showFrame();
 
   static int brightness = -1;
-  int want = card.alert && !diagnosticsSince ? 255 : idleBrightness;
+  int want = card.alert && !diagnosticsSince ? 255 : asleep ? 0 : idleBrightness;
   if (want != brightness) lcd.setBrightness(brightness = want);
 
   delay(15);

@@ -340,6 +340,12 @@ curl -X POST "http://claude-status.local/whitebalance?r=100&g=90&b=70"
 ```
 To change how bright the normal screens are (alerts are always full brightness), use `curl -X POST "http://claude-status.local/brightness?level=100"` (percent; it starts at 80% on a T-RGB).
 
+**Night hours:** between 23:00 and 07:00 the screen switches off unless Claude needs you. Tap it to wake it for a minute (double-tap on the Waveshare). Change the hours, or turn them off:
+```bash
+curl -X POST "http://claude-status.local/sleep?from=22:30&to=07:30"
+curl -X POST "http://claude-status.local/sleep?off=1"
+```
+
 `curl http://claude-status.local/whitebalance` shows the current values; `r=100&g=100&b=100` turns the correction off.
 
 The screen type is detected from the touch controller at start-up, but the newer revision of the 2.1" board (V2) can't be told apart from the original, so it gets the original's settings. If the screen is blank, tinted or the colours look wrong, force the type by adding e.g. `-DTRGB_PANEL=LILYGO_T_RGB_2_8_INCHES` (or `LILYGO_T_RGB_2_1_INCHES_FULL_CIRCLE`, `…_HALF_CIRCLE`, `…_FULL_CIRCLE_V2`, `…_HALF_CIRCLE_V2`) to `build_flags` in the `lilygo-t-rgb` environment.
