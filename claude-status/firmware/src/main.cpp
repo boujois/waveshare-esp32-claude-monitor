@@ -1205,6 +1205,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOSTNAME);
   WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);  // Wi-Fi power saving makes the display miss pushes and mDNS queries
 #ifdef WIFI_SSID
   if (!wifiManager.getWiFiIsSaved()) WiFi.begin(WIFI_SSID, WIFI_PASS);  // development builds only
 #endif
@@ -1310,10 +1311,24 @@ void loop() {
     Serial.println("Wi-Fi connected, IP " + WiFi.localIP().toString());
     if (!serverStarted) {  // the setup portal uses port 80 too, so start ours once it's closed
       server.begin();
-      if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
-      Serial.printf("mDNS: %s.local\n", HOSTNAME);
       serverStarted = true;
     }
+    // (Re)announce the name after every (re)connect: mDNS stops answering after a Wi-Fi drop
+    // otherwise, and the Mac can't find the display any more.
+    MDNS.end();
+    if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
+    Serial.printf("mDNS: %s.local\n", HOSTNAME);
+  }
+  // Auto-reconnect occasionally gives up after a long outage; nudge it once a minute.
+  static uint32_t offlineSince = 0;
+  if (connected || !serverStarted) {
+    offlineSince = 0;
+  } else if (!offlineSince) {
+    offlineSince = millis() | 1;
+  } else if (millis() - offlineSince > 60000) {
+    Serial.println("Wi-Fi still down, reconnecting");
+    WiFi.reconnect();
+    offlineSince = millis() | 1;
   }
   wasConnected = connected;
 
