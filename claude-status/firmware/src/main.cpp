@@ -1220,7 +1220,7 @@ static void catWalk() {
   while (true) {
     frame.fillScreen(COL_BG);
     if (!drawCatWalk(frame, millis() - start)) break;
-    frame.pushSprite(0, 0);
+    showFrame();
     delay(10);
   }
 }
