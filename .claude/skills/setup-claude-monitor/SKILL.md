@@ -1,6 +1,6 @@
 ---
 name: setup-claude-monitor
-description: Set up the Waveshare ESP32-S3 Claude status display from scratch, update it, or repair a setup. Covers checking prerequisites, flashing the published firmware (or building it), Wi-Fi setup from a phone, installing the Mac helper, hooks and chat connector, plan usage rings, and an end-to-end test. Use when someone asks to set up, install, update, flash or configure the display or "Claude monitor", change its Wi-Fi, or fix a display that isn't showing anything.
+description: Set up the Waveshare ESP32-S3 Claude status display from scratch, update it, or repair a setup. Covers checking prerequisites, flashing the published firmware (or building it), Wi-Fi setup from a phone, installing the Mac helper, menu bar app, hooks and chat connector, plan usage rings, night mode, and an end-to-end test. Use when someone asks to set up, install, update, flash or configure the display or "Claude monitor", change its Wi-Fi, or fix a display that isn't showing anything.
 ---
 
 # Set up the Claude status display
@@ -24,7 +24,7 @@ You're helping someone get the round desk display from this project working: a W
 
 | Check | Command | If it's missing |
 |---|---|---|
-| macOS | `uname -s` should print `Darwin` | Stop. The Mac helper uses launchd and the Keychain, so this project is macOS-only. |
+| macOS | `uname -s` should print `Darwin`; `sw_vers -productVersion` | Stop. The Mac helper uses launchd and the Keychain, so this project is macOS-only. The menu bar app, where plan usage and the options live, needs macOS 13 or later; on older versions use the `config.json` fallbacks below. |
 | Python 3 | `xcode-select -p` (Apple's Python) or `which python3` | Run `xcode-select --install`. 🙋 They click **Install** in the dialog and wait for it to finish. The install scripts find a usable Python themselves (Homebrew's or Apple's). |
 | esptool | `which esptool.py esptool` | Needed to flash the published firmware in step 3. Install with `brew install esptool` if Homebrew is there (`which brew`); otherwise `python3 -m pip install --user esptool`, which installs `esptool.py` into the user's Python `bin` folder. |
 | Claude CLI | `which claude` | Only needed for the plan usage rings (step 6). |
@@ -90,17 +90,18 @@ Install the helper from the **latest release** into a permanent folder, the same
 ```bash
 DEST="$HOME/Library/Application Support/Claude Monitor"; Z=$(mktemp -d)
 curl -fsSL -o "$Z/mac.zip" https://github.com/boujois/waveshare-esp32-claude-monitor/releases/latest/download/Claude-Monitor-Mac.zip
-unzip -q "$Z/mac.zip" -d "$Z" && mkdir -p "$DEST" && cp -R "$Z/Claude Monitor/helper/." "$DEST/" && chmod +x "$DEST"/*.sh
+unzip -q "$Z/mac.zip" -d "$Z" && mkdir -p "$DEST" && rm -rf "$DEST/Claude Monitor.app" && cp -R "$Z/Claude Monitor/helper/." "$DEST/" && chmod +x "$DEST"/*.sh
 "$DEST/install.sh"
 ```
 
-This installs a launchd agent (`com.claude-status.bridge`), adds async hooks to `~/.claude/settings.json` (backed up first), adds the chat connector to the Claude app if the app is closed, and adds the global `update-claude-monitor` skill. From here on, the helper's files and `config.json` live in `$DEST`. The helper pairs with the display by itself within a minute, which is what makes Wi-Fi firmware updates possible. Only if they're changing the helper's code should you install from `claude-status/bridge` instead; that's a "dev" install, which can't update itself.
+This installs a launchd agent (`com.claude-status.bridge`), adds async hooks to `~/.claude/settings.json` (backed up first), adds the chat connector to the Claude app if the app is closed, and adds the global `update-claude-monitor` skill. On macOS 13 or later it also installs the **menu bar app** to `~/Applications/Claude Monitor.app`, with its own launchd agent (`com.claude-status.menubar`) so it starts at login. (The old app bundle is removed first because `cp -R` would merge into it.) From here on, the helper's files and `config.json` live in `$DEST`. The helper pairs with the display by itself within a minute, which is what makes Wi-Fi firmware updates possible. Only if they're changing the helper's code should you install from `claude-status/bridge` instead; that's a "dev" install, which can't update itself, and it builds the menu bar app only with Swift 6 (Xcode or the Command Line Tools 16 or later). Without that it skips the app and says why. `CLAUDE_STATUS_NO_MENUBAR=1` skips it on purpose.
 
-- **If mDNS didn't work in step 3**, create `"$DEST/config.json"` with `{"device_host": "<IP>"}` and restart the helper with `launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge`. Suggest a DHCP reservation in their router so the IP doesn't change.
+- **If mDNS didn't work in step 3**, add `"device_host": "<IP>"` to `"$DEST/config.json"`, merging it with the keys already there (the helper has already saved `device_key` in it), and restart the helper with `launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge`. Suggest a DHCP reservation in their router so the IP doesn't change.
 - **Verify the helper:**
   - `tail -5 ~/Library/Logs/claude-status-bridge.log` should show `pushing to claude-status.local (…)`.
   - The display should switch to the status screen. Confirm with a screenshot.
 - **Verify the hooks:** run `curl -s http://127.0.0.1:47823/state | jq .hook_events_seen`, then run any tool, then check again. The number should go up. Hooks load in new sessions; if this session started before the install, the count may stay at 0 until the session is restarted.
+- **Verify the menu bar app:** `pgrep -x "Claude Monitor"` should print a process ID. If the installer said it skipped the app, tell them why (macOS version, or no Swift 6 for a dev install); everything else still works.
 
 ## 5. Chat connector (only if they use the Claude desktop app)
 
@@ -118,34 +119,42 @@ Their sessions are restored when the app reopens. After that, the connector shou
 
 > When a reply ends with a question for me, or you need me to choose or decide something before you can continue, call the claude-status `waiting_for_user` tool as the last step, with a short version of the question and a 2-5 word title for the chat.
 
-## 6. Plan usage rings (optional, Pro/Max plans only)
+## 6. Plan usage rings and options (optional)
 
-The rings use the **terminal** `claude` login, which is separate from the desktop app's sign-in.
+The rings show the 5-hour and weekly limits of a Pro or Max plan. They use the **terminal** `claude` login, which is separate from the desktop app's sign-in.
+
+1. 🙋 They click the **Claude Monitor** icon in the menu bar (a small circle inside a circle, near the clock), then **Connect** under **Plan usage**. If the terminal `claude` isn't signed in, Terminal opens and runs `claude auth login`, which opens the browser; the panel waits and carries on by itself once they're signed in. If the icon is hidden (a full menu bar or the notch), they open **Claude Monitor** from `~/Applications` or Spotlight to get the same panel in a window.
+2. 🙋 macOS asks whether `security` can read "Claude Code-credentials". They should click **Always Allow**. If they click *Deny*, the panel shows the error; they click **Try again** and then **Always Allow**.
+3. Verify with `curl -s http://127.0.0.1:47823/state | jq .usage`. You should see `h5` and `d7` percentages. `curl -s http://127.0.0.1:47823/settings | jq .status.usage` shows the state the panel shows (`ok`, `pending`, `signed_out` or `error`, with a message).
+
+**Without the menu bar app** (macOS 12 or older, or a dev install that skipped it):
 
 1. 🙋 They run `claude auth login`, which opens the browser. Check with `claude auth status` that `"loggedIn": true`. That command doesn't print the token.
-2. Set `"plan_usage": true` in `"$HOME/Library/Application Support/Claude Monitor/config.json"`. Merge it with any existing keys, such as `device_host`, rather than overwriting the file. Then restart the helper:
+2. Set `"plan_usage": true` in `"$HOME/Library/Application Support/Claude Monitor/config.json"`. Merge it with the existing keys, such as `device_key` and `device_host`, rather than overwriting the file. Then restart the helper:
    ```bash
    launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
    ```
-3. 🙋 macOS asks whether `security` can read "Claude Code-credentials". They should click **Always Allow**.
-4. Verify with `curl -s http://127.0.0.1:47823/state | jq .usage`. You should see `h5` and `d7` percentages.
+3. 🙋 They click **Always Allow** on the Keychain prompt, and you verify as above.
 
-The same sign-in also powers the **reply check**. When a Claude Code turn ends without an obvious question, the helper asks Haiku whether the reply is waiting on them, so requests like "after you approve, I'll…" still alert. Without the sign-in, only phrase matching runs. `"check_replies": false` in `config.json` turns it off.
+The same sign-in also powers the **reply check**. When a Claude Code turn ends without an obvious question, the helper asks Haiku whether the reply is waiting on them, so requests like "after you approve, I'll…" still alert. Without the sign-in, only phrase matching runs. The **Check replies with Haiku** switch in the menu bar app (or `"check_replies": false` in `config.json`) turns it off.
 
 The helper renews an expired token by itself with one tiny `claude -p` call. Don't suggest `claude setup-token`: those tokens get HTTP 403 from the usage endpoint.
 
-**Also optional, the CI card:** if they use GitHub, check `gh auth status`. With the GitHub CLI installed and signed in, the display shows the checks on the pull request for the session they have open in the Claude app. There's nothing to configure; `"ci_checks": false` in `config.json` turns it off.
+**Other options** are switches in the same panel, saved to `config.json` and applied straight away: **Night mode** (screen off or dim between two times, with alerts still lighting it if they like; a double tap on the dark screen peeks for 15 seconds), **Cat**, **CI checks**, **Anthropic incidents**, **Claude app chat alerts** and **Check replies with Haiku**. Ask whether they'd like night mode; 🙋 they switch it on in the panel and pick the hours. If the panel says *Update the display to use night mode*, the display's firmware is older than night mode: update it (see Updating below). Without the menu bar app, the same settings are `config.json` keys (see the README's Configuration section), and the helper needs a restart after editing it.
+
+**Also optional, the CI card:** if they use GitHub, check `gh auth status`. With the GitHub CLI installed and signed in, the display shows the checks on the pull request for the session they have open in the Claude app. There's nothing to configure; the **CI checks** switch turns it off.
 
 ## 7. End-to-end test
 
 1. Use your question tool to ask them something harmless, such as how the display looks. While the question is open, the display should show a pulsing orange **Question** alert with this session's name. Confirm by taking a screenshot yourself, and ask them too. Before they answer, they can double-tap the case: the alert should hide and the status screen show `1 waiting`. It clears for good after they answer.
 2. If they set up chats: ask them to open a Chat and say *"ask me a question"*, choosing **Always allow** the first time. The helper log should show `chat: question from …`.
+3. The menu bar app: render its panel with live data and read the image, `"$HOME/Applications/Claude Monitor.app/Contents/MacOS/Claude Monitor" --snapshot /tmp/panel.png`. It should say **Display connected** and list their sessions, with plan usage if they connected it. Ask them to click the icon too, so they know where the options are.
 
 Finish with a short summary of what's set up, anything they skipped, and where the README covers configuration and troubleshooting.
 
 ## Updating
 
-Use the `update-claude-monitor` skill, or run `"$HOME/Library/Application Support/Claude Monitor/update.sh"` (`--check` to only compare versions). It updates the Mac helper from the latest release, keeping `config.json`, and the display over Wi-Fi. A display on v1.0.x firmware needs one last USB flash (step 3, option A) before Wi-Fi updates work; a Mac install without `update.sh` needs step 4 again.
+Use the `update-claude-monitor` skill, or run `"$HOME/Library/Application Support/Claude Monitor/update.sh"` (`--check` to only compare versions); the menu bar panel's **Update to v…** button runs the same thing in Terminal. It updates the Mac helper and the menu bar app from the latest release, keeping `config.json`, and the display over Wi-Fi. A display on v1.0.x firmware needs one last USB flash (step 3, option A) before Wi-Fi updates work; a Mac install without `update.sh` needs step 4 again.
 
 ## Changing Wi-Fi later
 
@@ -155,8 +164,8 @@ A dev build with a filled-in `secrets.h` reconnects to that network instead of o
 
 ## Uninstalling
 
-Run `"$HOME/Library/Application Support/Claude Monitor/uninstall.sh"` (it also removes the update skill), then delete that folder. If the Claude app is open, the uninstaller says to run `install-chat-connector.sh --remove` from Terminal.app to remove the connector. They should also delete the personal-preferences line themselves.
+Run `"$HOME/Library/Application Support/Claude Monitor/uninstall.sh"` (it also removes the update skill and the menu bar app), then delete that folder. If the Claude app is open, the uninstaller says to run `install-chat-connector.sh --remove` from Terminal.app to remove the connector. They should also delete the personal-preferences line themselves.
 
 ## For maintainers
 
-Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. It attaches `Claude-Monitor-Mac.zip` and `claude-monitor-firmware.bin` to the release and publishes the installer site to GitHub Pages. The `github-pages` environment allows `main` and `v*` tags. `tools/build-release.sh` builds the same files locally into `dist/`.
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. It attaches `Claude-Monitor-Mac.zip` and `claude-monitor-firmware.bin` to the release and publishes the installer site to GitHub Pages. The `github-pages` environment allows `main` and `v*` tags. `tools/build-release.sh` builds the same files locally into `dist/`. Both build the menu bar app into the Mac zip, so they need macOS with Xcode or the Command Line Tools 16 or later (the workflow runs on `macos-latest`).

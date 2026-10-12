@@ -19,7 +19,8 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # macOS for Swift: the Mac package includes the menu bar app
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -27,10 +28,11 @@ jobs:
         with:
           python-version: "3.11"
 
+      # OS and CPU in the key, so toolchains built for another platform are never restored
       - uses: actions/cache@v4
         with:
           path: ~/.platformio
-          key: platformio-${{ hashFiles('claude-status/firmware/platformio.ini') }}
+          key: platformio-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('claude-status/firmware/platformio.ini') }}
 
       - name: Install PlatformIO and esptool
         run: pip install platformio "esptool<5"
@@ -54,11 +56,12 @@ jobs:
             --notes-file - <<'EOF'
           ## Install
 
-          1. **Flash the display:** open the [browser installer](https://boujois.github.io/waveshare-esp32-claude-monitor/) in Chrome or Edge, plug in the display and click **Install**.
-          2. **Wi-Fi:** on your phone, join the `Claude-Monitor-Setup` network shown on the display and pick your Wi-Fi.
-          3. **Mac:** download **Claude-Monitor-Mac.zip** below, open it, right-click **Install.command** and choose **Open**.
+          1. **Plug the display into your Mac**, open Terminal, paste this line and press Return: `/bin/bash -c "$(curl -fsSL https://boujois.github.io/waveshare-esp32-claude-monitor/install.sh)"`. It puts the software on the display over USB, tells you when to connect the display to your Wi-Fi from your phone (join `Claude-Monitor-Setup`), and sets up your Mac.
+          2. **Options:** click the Claude Monitor icon in the menu bar (a small circle inside a circle, near the clock). **Plan usage → Connect** shows your 5-hour and weekly limits on the display, and **Night mode** darkens it overnight. The menu bar app needs macOS 13 or later.
 
-          **Already installed?** Right-click **Update.command** (from the zip) and choose **Open**, or ask Claude Code to *"update my Claude monitor"*. From v1.1.0 on, the display updates over Wi-Fi.
+          **Rather not use Terminal?** Download **Claude-Monitor-Mac.zip** below, plug in the display and double-click **Install.command**. macOS stops it the first time, so click **Done**, then **System Settings → Privacy & Security → Open Anyway**. Or put the software on the display from the [browser installer](https://boujois.github.io/waveshare-esp32-claude-monitor/) in Chrome or Edge.
+
+          **Already installed?** Click **Update** in the menu bar app, run the Terminal line above again, or ask Claude Code to *"update my Claude monitor"*. From v1.1.0 on, the display updates over Wi-Fi.
 
           If the installer page doesn't open, flash `claude-monitor-firmware.bin` with [Espressif's web flasher](https://espressif.github.io/esptool-js/) at address `0x0`. `claude-monitor-app.bin` is the app-only image used for Wi-Fi updates.
           EOF

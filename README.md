@@ -27,8 +27,9 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
 - [How it works](#how-it-works)
 - [Install](#install)
   - [Option 1: Let Claude set it up (easiest)](#option-1-let-claude-set-it-up-easiest)
-  - [Option 2: Download the installer (no coding)](#option-2-download-the-installer-no-coding)
+  - [Option 2: One line in Terminal (no coding)](#option-2-one-line-in-terminal-no-coding)
   - [Option 3: Build it yourself, step by step](#option-3-build-it-yourself-step-by-step)
+- [The menu bar app](#the-menu-bar-app)
 - [Updating](#updating)
 - [Reading the screen](#reading-the-screen)
 - [Configuration](#configuration)
@@ -63,7 +64,11 @@ The alert clears itself as soon as you respond, so you don't need to touch the d
 
 **🟢 While CI runs** on the pull request for the session you have open in the Claude app, the display shows its checks as a ring that fills in as they pass.
 
+**🌙 At night**, [night mode](#night-mode) can turn the screen off or dim it, and still light it up when Claude needs you.
+
 It works with every Claude Code session on your Mac: the desktop app, the terminal and IDE extensions. It can also alert you when a **regular chat in the Claude app** needs you, either to approve a connector or tool, or to answer a question Claude has asked (see [step 7](#7-optional-alerts-for-claude-app-chats)).
+
+You change the options from a small [menu bar app](#the-menu-bar-app) on your Mac: plan usage, night mode, the cat and the rest.
 
 ---
 
@@ -73,12 +78,12 @@ It works with every Claude Code session on your Mac: the desktop app, the termin
 |---|---|
 | 🖥️ **The display** | [Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28): an ESP32-S3 with a 1.28" 240×240 round screen (GC9A01). The version with the CNC metal case ("-B") looks great on a desk. Get the **non-touch** version; the touch version uses different pins. |
 | 🔌 **A USB-C cable** | For flashing, and for power afterwards. Once it's set up, any USB phone charger will do. |
-| 🍎 **A Mac** | Running Claude Code. The helper uses `launchd` and the macOS Keychain. |
+| 🍎 **A Mac** | Running Claude Code. The helper uses `launchd` and the macOS Keychain, and the [menu bar app](#the-menu-bar-app) needs macOS 13 or later. |
 | 📶 **2.4 GHz Wi-Fi** | The ESP32 can't join 5 GHz-only networks. |
-| 🌐 **Chrome or Edge** | For the one-click firmware installer. Safari and Firefox can't talk to USB devices. |
+| 🌐 **Chrome or Edge** | Only to put the software on the display from your browser instead of Terminal. Safari and Firefox can't talk to USB devices. |
 | 🐍 **Python 3** | For the Mac helper. macOS has it once Apple's Command Line Tools are installed; the installer offers to install them if needed. |
 | 🐙 **Optional: the [GitHub CLI](https://cli.github.com)** | For the [CI card](#the-ci-card): `brew install gh`, then `gh auth login` |
-| 🛠️ **[PlatformIO](https://platformio.org/install/cli)** | *Developers only*, to build the firmware yourself: `brew install platformio` |
+| 🛠️ **[PlatformIO](https://platformio.org/install/cli)** | *Developers only*, to build the firmware yourself: `brew install platformio`. Building the menu bar app yourself also needs Xcode, or the Command Line Tools 16 or later. |
 | 🖨️ **Optional: a 3D printer** | To print a [desk stand](#-stand-3d-printable-desk-stands). You'll also want a right-angle USB-C cable. Four 8 × 2 mm button magnets are optional, if you'd like to stick the stand to a metal surface. |
 
 ---
@@ -102,6 +107,7 @@ flowchart LR
         CH -.writes.-> L
         L --> B
         CH -- "claude-status connector<br/>(waiting_for_user)" --> B
+        MB["Menu bar app<br/>(options)"] -- "settings<br/>(127.0.0.1)" --> B
     end
     A["Anthropic usage API<br/>(optional)"] --> B
     G["GitHub CI checks<br/>(via gh, optional)"] --> B
@@ -109,7 +115,7 @@ flowchart LR
     B -- "POST /state over Wi-Fi<br/>(every second when changed)" --> D["Round display<br/>claude-status.local"]
 ```
 
-There are three main moving parts, plus an extra for chats:
+There are three main moving parts, plus an extra for chats and the menu bar app for options:
 
 1. **Claude Code hooks** fire on events like *permission requested*, *question asked*, *tool finished* and *turn finished*. Each hook is a tiny background `curl` that forwards the event to the helper on `127.0.0.1`. The hooks are async, so they never slow Claude down, and they quietly do nothing if the helper isn't running.
 2. **The Mac helper** (`claude-status/bridge/claude_status_bridge.py`) merges three sources into one small JSON summary:
@@ -118,8 +124,9 @@ There are three main moving parts, plus an extra for chats:
    - **your transcripts**, for today's token and prompt totals
 
    If you turn it on, it also checks your plan usage with Anthropic. If the GitHub CLI is signed in, it asks GitHub about the checks on the pull request for the session you have open in the Claude app. Every 2 minutes it checks Anthropic's status page for incidents. It pushes the summary to the display whenever something changes, plus a heartbeat every 10 seconds.
-3. **The display firmware** (`claude-status/firmware/`) joins your Wi-Fi and announces itself as `claude-status.local`. It accepts the summary on `POST /state` and draws the right screen at about 30 fps.
+3. **The display firmware** (`claude-status/firmware/`) joins your Wi-Fi and announces itself as `claude-status.local`. It accepts the summary on `POST /state` and draws the right screen at about 30 fps. It runs [night mode](#night-mode) by itself, so that keeps working while your Mac sleeps.
 4. **Chats in the Claude app** don't have hooks, so the helper uses two other signals. It watches the app's chat-window log for **tool approval prompts**. A tiny local **connector** (`chat_mcp.py`) also gives Claude a `waiting_for_user` tool, which it calls when a reply ends with a question for you.
+5. **The [menu bar app](#the-menu-bar-app)** (`claude-status/menubar/`) shows what the helper is up to and changes its settings, over the same local port. The settings themselves live in the helper.
 
 ---
 
@@ -130,7 +137,7 @@ There are three ways to install, easiest first:
 | | Best for | You'll need |
 |---|---|---|
 | 🤖 **[Option 1: Let Claude set it up](#option-1-let-claude-set-it-up-easiest)** | Anyone who uses Claude Code | Claude Code: the Claude app's **Code** tab, or `claude` in a terminal |
-| ⬇️ **[Option 2: Download the installer](#option-2-download-the-installer-no-coding)** | No coding, and no Claude Code needed | Google Chrome or Microsoft Edge |
+| ⌨️ **[Option 2: One line in Terminal](#option-2-one-line-in-terminal-no-coding)** | No coding, and no Claude Code needed | Nothing else: every Mac has Terminal |
 | 🛠️ **[Option 3: Build it yourself](#option-3-build-it-yourself-step-by-step)** | Developers who want to change the code | PlatformIO and a terminal |
 
 All three need the display, a USB-C **data** cable (many charging-only cables won't work) and a Mac.
@@ -160,13 +167,28 @@ Allow about 10 minutes. Claude flashes the published firmware, the same files as
 
 ---
 
-## Option 2: Download the installer (no coding)
+## Option 2: One line in Terminal (no coding)
 
-No coding, no command line, about 10 minutes. Use **Google Chrome** or **Microsoft Edge** for step 1.
+No coding and nothing to install first, about 10 minutes. You paste one line into Terminal and follow along.
+
+1. **Plug the display into your Mac** with the USB-C cable.
+2. **Open Terminal** (in **Applications → Utilities**), paste this line and press **Return**:
+   ```bash
+   /bin/bash -c "$(curl -fsSL https://boujois.github.io/waveshare-esp32-claude-monitor/install.sh)"
+   ```
+3. **Follow along.** The installer:
+   - **puts the software on the display** over USB. It asks first, and keeps any Wi-Fi the display already has. A display that's already on your Wi-Fi is left alone, because it gets new software over Wi-Fi.
+   - **tells you when to connect the display to your Wi-Fi** from your phone ([step 2](#2-connect-the-display-to-your-wi-fi)). Carry on in Terminal meanwhile.
+   - **sets up your Mac:** the background helper, the Claude Code hooks and the [menu bar app](#the-menu-bar-app) ([step 3](#3-set-up-your-mac)).
+   - **waits for the display** to join your Wi-Fi. Then it switches to your Claude status.
+
+It downloads the [latest release](https://github.com/boujois/waveshare-esp32-claude-monitor/releases/latest) from GitHub, and Espressif's `esptool` (about 60 MB, checked against a pinned checksum) to put the software on the display. To read it first: the line runs [`install.sh`](claude-status/package/web/install.sh), which runs [`Install.command`](claude-status/package/Install.command) and [`flash-display.sh`](claude-status/package/flash-display.sh) from the release.
+
+The steps below are what the installer does, and how to do each one yourself.
 
 ### 1. Put the software on the display
 
-Open the **[Claude Monitor installer](https://boujois.github.io/waveshare-esp32-claude-monitor/)** in Chrome or Edge. Plug the display into your computer, click **Install Claude Monitor**, choose the display from the list, then click **Install**. It takes about a minute.
+The Terminal line does this for you. To use your browser instead, open the **[Claude Monitor installer](https://boujois.github.io/waveshare-esp32-claude-monitor/)** in Chrome or Edge. Plug the display into your computer, click **Install Claude Monitor**, choose the display from the list, then click **Install**. It takes about a minute.
 
 <details>
 <summary><b>The installer page doesn't open?</b> Use Espressif's web flasher instead</summary>
@@ -193,12 +215,22 @@ If the display can't find its saved Wi-Fi, for example after moving house, it op
 
 ### 3. Set up your Mac
 
-1. Download **`Claude-Monitor-Mac.zip`** from the [latest release](https://github.com/boujois/waveshare-esp32-claude-monitor/releases/latest) and double-click it to unzip.
-2. In the **Claude Monitor** folder, **right-click `Install.command` and choose Open**. macOS blocks double-clicking downloaded scripts the first time. If it still refuses, open **System Settings → Privacy & Security** and click **Open Anyway**.
-3. Answer the questions in the window that opens. It asks before restarting the Claude app, and before turning on plan usage.
-4. For chat questions, the installer copies one sentence to your clipboard. Paste it into **Claude → Settings → Profile → personal preferences**.
+The Terminal line does this too. Along the way:
 
-Within a few seconds the display switches to your Claude status. To remove everything later, right-click **`Uninstall.command`** and choose **Open**.
+1. Answer the installer's questions. It asks before restarting the Claude app.
+2. For chat questions, the installer copies one sentence to your clipboard. Paste it into **Claude → Settings → Profile → personal preferences**.
+3. **Optional:** click the new **Claude Monitor** icon in the menu bar, near the clock: a small circle inside a circle. Click **Connect** under **Plan usage** to show your plan usage on the display (see [step 6](#6-optional-turn-on-plan-usage-rings)), and set up [night mode](#night-mode) if you like.
+
+Within a few seconds of the display joining your Wi-Fi, it switches to your Claude status. On macOS 12 or older there's no menu bar app, so the installer asks about plan usage itself. To remove everything later, see [Uninstalling](#uninstalling).
+
+<details>
+<summary><b>Rather not use Terminal?</b> Download the installer instead</summary>
+
+1. Download **`Claude-Monitor-Mac.zip`** from the [latest release](https://github.com/boujois/waveshare-esp32-claude-monitor/releases/latest) and double-click it to unzip.
+2. Plug the display into your Mac, unless it's already on your Wi-Fi.
+3. In the **Claude Monitor** folder, double-click **`Install.command`**. macOS stops it the first time with *"Install.command" Not Opened*: click **Done**, open **System Settings → Privacy & Security**, and click **Open Anyway** next to *"Install.command" was blocked*. (On macOS 14 or older, right-click it and choose **Open** instead.)
+4. From there it's the same as the Terminal line, display included. The Terminal line never sees the warning: macOS only checks files that a browser marks as downloaded, and `curl` doesn't mark them.
+</details>
 
 ---
 
@@ -245,11 +277,12 @@ cd ../bridge
 ./install.sh
 ```
 
-This does three things:
+This does four things:
 
 - **Starts the helper as a background service** (`~/Library/LaunchAgents/com.claude-status.bridge.plist`). It starts when you log in and restarts itself if it ever crashes.
 - **Adds the hooks to `~/.claude/settings.json`**, after saving a timestamped backup next to it. Your existing settings and hooks are left as they are. Ours are tagged with `CLAUDE_STATUS` so they can be found and removed cleanly later.
 - **Adds the `claude-status` connector to the Claude app** (`claude_desktop_config.json`, also backed up first) for [chat alerts](#7-optional-alerts-for-claude-app-chats). The app overwrites that file while it's running, so if the app is open, the installer skips this step and tells you to run `./install-chat-connector.sh` from **Terminal.app** instead. That script quits the Claude app, adds the connector and reopens the app; your sessions are still there afterwards.
+- **Builds and installs the [menu bar app](#the-menu-bar-app)** to `~/Applications/Claude Monitor.app`, with its own background service (`com.claude-status.menubar`) so it starts when you log in. Building it needs Swift 6, which comes with Xcode or the Command Line Tools 16 or later (on macOS 14 or later). Without that, the installer skips the app, says why, and sets up everything else. To skip it anyway, run `CLAUDE_STATUS_NO_MENUBAR=1 ./install.sh`. (The downloadable installer comes with the app already built, and runs it on macOS 13 or later.)
 
 > ℹ️ The installer finds Python by itself (Homebrew's, or the one that comes with Apple's Command Line Tools). To use a specific one, run `PYTHON=/path/to/python3 ./install.sh`.
 
@@ -261,28 +294,34 @@ Ask Claude something that needs your approval, or just ask it to *"ask me a ques
 
 ### 6. (Optional) Turn on plan usage rings
 
-The rings show your 5-hour and weekly plan limits, the same numbers as Claude Code's `/usage` screen. They use the sign-in of the **terminal** `claude` command. The desktop app keeps its own separate sign-in, so you need to sign the terminal in once.
+The rings show your 5-hour and weekly plan limits, the same numbers as Claude Code's `/usage` screen. They're for Claude Pro and Max plans. They use the sign-in of the **terminal** `claude` command. The desktop app keeps its own separate sign-in, so you need to sign the terminal in once.
 
-**a. Sign the terminal in.** This opens your browser:
+**a. Connect.** Click the Claude Monitor icon in the menu bar, then click **Connect** under **Plan usage**.
 
-```bash
-claude auth login
-```
+**b. Sign in, if asked.** If the terminal `claude` command isn't signed in yet, Terminal opens and runs `claude auth login`, which opens your browser. The panel says *Finish signing in in Terminal…* and carries on by itself once you're done.
 
-**b. Switch plan usage on and restart the helper:**
+**c. Allow Keychain access.** macOS will ask whether `security` can read **"Claude Code-credentials"**. Click **Always Allow**. If you click plain *Allow*, it will ask again after every restart. If you click *Deny*, the panel says so: click **Try again**, then **Always Allow**.
 
-```bash
-echo '{"plan_usage": true}' > config.json
-```
-```bash
-launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
-```
+The rings fill in within a few seconds and refresh every 5 minutes. The panel shows the same numbers, and **Disconnect** turns plan usage off again.
 
-**c. Allow Keychain access.** macOS will ask whether `security` can read **"Claude Code-credentials"**. Click **Always Allow**. If you click plain *Allow*, it will ask again after every restart.
+<details>
+<summary><b>Without the menu bar app</b></summary>
 
-The rings fill in within a few seconds and refresh every 5 minutes.
+1. Sign the terminal in. This opens your browser:
+   ```bash
+   claude auth login
+   ```
+2. Add `"plan_usage": true` to `config.json` in this folder. Keep the keys already in it, especially `device_key`, the display's pairing key. This command adds the key and leaves the rest alone:
+   ```bash
+   python3 -c 'import json, pathlib; p = pathlib.Path("config.json"); c = json.loads(p.read_text()) if p.exists() else {}; c["plan_usage"] = True; p.write_text(json.dumps(c, indent=2) + "\n")'
+   ```
+3. Restart the helper, then allow Keychain access as in step c:
+   ```bash
+   launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
+   ```
+</details>
 
-**Keeping it signed in:** the sign-in token expires every few hours. When it does, the helper asks the `claude` command to renew it by sending one tiny prompt (`ok`) on Haiku. That prompt runs with no tools, connectors, hooks or saved session, so it uses a negligible sliver of your plan. You'll see `plan usage: token renewed` in the log when it happens. You should only need `claude auth login` again if you sign out, or if the sign-in is revoked.
+**Keeping it signed in:** the sign-in token expires every few hours. When it does, the helper asks the `claude` command to renew it by sending one tiny prompt (`ok`) on Haiku. That prompt runs with no tools, connectors, hooks or saved session, so it uses a negligible sliver of your plan. You'll see `plan usage: token renewed` in the log when it happens. If it can't renew, for example while you're offline, the panel says *Couldn't renew your Claude login (offline?)* and the helper tries again 5 minutes later. You should only need `claude auth login` again if you sign out, or if the sign-in is revoked; the panel then shows **Sign in…**.
 
 > 🔒 The token is only ever sent to `api.anthropic.com`. The helper never refreshes, rewrites or logs it. Renewal is done by the `claude` command itself.
 
@@ -315,6 +354,8 @@ The display then shows **Question → *chat title* → *the question***.
 - when the chat's **next tool runs** without needing approval (approval alerts only)
 - **after 10 minutes**, as a backstop
 
+To turn chat alerts off, switch off **Claude app chat alerts** in the menu bar app.
+
 > ⚠️ **Good to know:**
 > - Question alerts rely on Claude choosing to call the tool. That's usually reliable, but not guaranteed.
 > - Tool approvals are read from the app's internal log, so an app update could quietly change or break them.
@@ -322,19 +363,46 @@ The display then shows **Question → *chat title* → *the question***.
 
 ---
 
+## The menu bar app
+
+<img src="docs/images/menubar.png" width="240" align="right" alt="The Claude Monitor panel: display connected, plan usage bars for 5-hour and weekly, night mode from 22:00 to 07:00, and switches for the cat, CI checks, incidents, chat alerts and reply checks">
+
+Claude Monitor puts a small icon in your Mac's menu bar, near the clock: a **circle inside a circle**. It turns into a **moon** during night mode hours, and a **dashed circle** when the Mac helper isn't running.
+
+Click it for:
+
+- **Status:** whether the display is connected, and which firmware it runs; your sessions, e.g. *1 needs you · 2 working*; any Anthropic incident; and an **Update to v1.x.x…** button when there's a new release.
+- **Plan usage:** **Connect**, then your 5-hour and weekly usage and when each resets. **Disconnect** turns it off. See [step 6](#6-optional-turn-on-plan-usage-rings).
+- **Night mode:** on or off, **From** and **To** times, **Screen** *Off* or *Dim*, and **Alerts still light it up**. See [Night mode](#night-mode).
+- **Display:** switches for **Cat**, **CI checks** and **Anthropic incidents**.
+- **Alerts:** switches for **Claude app chat alerts** and **Check replies with Haiku**.
+- **Open Log** and **Quit**.
+
+Changes are saved in the helper's [`config.json`](#configuration) and take effect within a second, without restarting anything. If the helper isn't running, the panel says so and offers **Start helper**.
+
+**Can't see the icon?** A full menu bar, or the notch on a MacBook, can hide it. Open **Claude Monitor** from the Applications folder in your home folder, or find it with Spotlight: the same options open in a window. Closing the window only hides it.
+
+The installer puts the app in `~/Applications` and starts it when you log in. **Quit** keeps it closed until you next log in, or until you open it again from `~/Applications`. It needs macOS 13 or later. Everything else works without it, and you can still change the options in [`config.json`](#configuration).
+
+<br clear="right">
+
+---
+
 ## Updating
 
-When a new version comes out, the display's footer alternates with **"Update: v1.x.x"**. The helper checks GitHub once a day. To update, do any of these:
+When a new version comes out, the display's footer alternates with **"Update: v1.x.x"**, and the menu bar panel shows an **Update to v1.x.x…** button. The helper checks GitHub once a day. To update, do any of these:
 
+- **Click Update to v1.x.x…** in the [menu bar app](#the-menu-bar-app). It opens Terminal and runs the updater.
 - **Ask Claude Code** *"update my Claude monitor"*. The installer adds an `update-claude-monitor` skill to Claude Code, so this works in any session.
-- **Double-click** `Update.command` from the Mac zip; the first time, right-click it and choose **Open**.
+- **Run the [install line](#option-2-one-line-in-terminal-no-coding) again:** it installs the latest release over the top, keeping your settings. It only updates a display that's plugged in over USB and not on your Wi-Fi; otherwise use one of the other ways.
+- **Double-click** `Update.command` from the Mac zip. macOS asks you to allow it the first time, as with `Install.command`.
 - **Run** `"$HOME/Library/Application Support/Claude Monitor/update.sh"` in a terminal. Add `--check` to only see the versions.
 
-It updates the Mac helper, keeping your settings, and sends the new firmware to the display **over Wi-Fi**. No cable is needed; the display shows a progress ring and restarts by itself.
+It updates the Mac helper and the menu bar app, keeping your settings, and sends the new firmware to the display **over Wi-Fi**. No cable is needed; the display shows a progress ring and restarts by itself, lighting up for it even during night mode. Updating from a version without the menu bar app installs it. Only one update runs at a time; a second one says *An update is already running in another Terminal window.*
 
 > 🔐 **Pairing:** the first time the helper finds the display, they pair with a random key. After that, only your Mac can update the display. To pair with a different Mac, power the display on 3 times in a row, each within 10 seconds of the last. That resets its Wi-Fi and pairing.
 
-> ⚠️ **Coming from v1.0.x?** Older displays can't update over Wi-Fi yet, and older Mac installs don't have `update.sh`. Do one last manual update: re-flash from the [installer page](https://boujois.github.io/waveshare-esp32-claude-monitor/), which keeps your Wi-Fi, and run `Install.command` from the new zip. Every update after that is automatic.
+> ⚠️ **Coming from v1.0.x?** Older displays can't update over Wi-Fi yet, and older Mac installs don't have `update.sh`. Do one last manual update: plug the display into your Mac and run the [install line](#option-2-one-line-in-terminal-no-coding) again. It puts the new software on over USB and keeps your Wi-Fi. (Re-flashing from the [installer page](https://boujois.github.io/waveshare-esp32-claude-monitor/) works too.) Every update after that is automatic.
 
 ---
 
@@ -347,7 +415,7 @@ It updates the Mac helper, keeping your settings, and sends the new firmware to 
 From top to bottom:
 
 - **Rings:** the outer 🔶 ring is your 5-hour plan usage and the inner 🔷 ring is weekly usage. They fill clockwise from 12 o'clock. The small white **tick** on each ring shows how much of that window has gone by. If the coloured arc is past its tick, you're using your plan faster than it lasts. While Anthropic has an incident affecting Claude Code, the API or claude.ai, the usage rings make way for a pulsing **red** ring, and *Anthropic incident* shows where the usage numbers were, with the incident's name scrolling underneath, e.g. *Elevated errors for Claude Opus 5.5*. Red error dots are then most likely Anthropic's problem, not yours.
-- **Time:** the current time, kept in sync over the internet (NTP).
+- **Time:** the current time, kept in sync over the internet (NTP). If your network blocks time servers, the display takes the time from your Mac instead.
 - **`5h 38%` / `wk 64%`:** the same usage as numbers, with the time left until each limit resets underneath. When you're ahead of the tick, it shows in yellow when you'd run out at this pace instead: `out 16:40`, or `out Fri` for the weekly limit.
 - **Headline**, with [the cat](#the-cat) acting it out beside it:
   - **`2 working`:** sessions are busy
@@ -375,7 +443,7 @@ A brown tabby sits beside the headline on the status screen and acts out what yo
 
 When the display powers on, the cat walks across the empty screen before anything else appears.
 
-Prefer the plain status screen? Set `"cat": false` in the helper's `config.json` (see [Configuration](#configuration)). The display remembers it, so the walk at power-on stops too.
+Prefer the plain status screen? Switch off **Cat** in the [menu bar app](#the-menu-bar-app), or set `"cat": false` in the helper's `config.json` (see [Configuration](#configuration)). The display remembers it, so the walk at power-on stops too.
 
 ### The alert screen
 
@@ -420,9 +488,24 @@ It follows the session you last opened in the Claude app, so it stays up while y
 
 Passed checks stay on screen for 10 minutes, then the status screen comes back (`ci_passed_window` in `config.json`). Failed checks stay until you push again. Double-tap to hide the card until the checks change.
 
-The helper asks GitHub with the [GitHub CLI](https://cli.github.com) (`gh`), every 15 seconds while checks run and every minute otherwise, so `gh` needs to be installed and signed in. Sessions in the terminal or an IDE don't get a CI card: only the Claude app tells the helper which session you have open.
+The helper asks GitHub with the [GitHub CLI](https://cli.github.com) (`gh`), every 15 seconds while checks run and every minute otherwise, so `gh` needs to be installed and signed in. Sessions in the terminal or an IDE don't get a CI card: only the Claude app tells the helper which session you have open. To turn the CI card off, switch off **CI checks** in the menu bar app.
 
 <br clear="right">
+
+### Night mode
+
+Night mode turns the screen off, or dims it right down, between two times you choose, such as 22:00 to 07:00. Turn it on in the [menu bar app](#the-menu-bar-app):
+
+- **From** and **To** are in 24-hour time, by your Mac's clock. The hours can run past midnight.
+- **Screen: Off** turns the backlight off. **Dim** leaves it just bright enough to glance at.
+- **Alerts still light it up:** a session that needs you still lights the screen, a little less brightly than by day. Done and CI cards stay dark. If the session you have open in the Claude app needs you, its alert shows instead of its CI card, which comes back, dark, once you dismiss the alert. Switch this off for a fully dark night.
+- **Peek:** double-tap the case, or press **BOOT**, while the screen is off or dimmed, and it lights up for 15 seconds. That tap only lights the screen; it doesn't dismiss anything. While it's lit, a double tap dismisses the card on screen as usual, and keeps the screen lit for another 15 seconds.
+
+The five-tap diagnostics, Wi-Fi setup and firmware updates also light the screen at night. The display goes dark again afterwards, even if it restarted.
+
+The display keeps the schedule itself, so night mode keeps working while your Mac is asleep or switched off. It does need to know the time, from a time server or from your Mac; until then, it's always day. While it's night, the menu bar icon turns into a moon and the panel says **On now**.
+
+Night mode needs a display firmware that has it. If the panel says *Update the display to use night mode*, [update](#updating) the display. Your night mode settings are saved meanwhile.
 
 ### How replies that need you are spotted
 
@@ -431,7 +514,7 @@ When a Claude Code turn ends, the helper reads Claude's final message:
 1. **Phrase check.** If the message ends with a question, or a request like *"after you approve"*, *"please confirm"*, *"should I…"* or *"over to you"*, the display shows a **Question** alert straight away.
 2. **Haiku check.** If the phrases don't catch it, the helper asks Claude Haiku, through the terminal `claude` command, whether the message is waiting on you, and gets a one-line summary for the display. Each check takes a few seconds and uses a sliver of your plan.
 
-The Haiku check needs the terminal `claude` command to be signed in, the same as the [plan usage rings](#6-optional-turn-on-plan-usage-rings). Without that sign-in, only the phrase check runs. To turn the Haiku check off, set `"check_replies": false` in `config.json`. When the helper starts, it also checks idle sessions from the last 24 hours, so nothing is missed after a restart.
+The Haiku check needs the terminal `claude` command to be signed in, the same as the [plan usage rings](#6-optional-turn-on-plan-usage-rings). Without that sign-in, only the phrase check runs. To turn the Haiku check off, switch off **Check replies with Haiku** in the menu bar app, or set `"check_replies": false` in `config.json`. When the helper starts, it also checks idle sessions from the last 24 hours, so nothing is missed after a restart.
 
 ### Colour guide
 
@@ -453,15 +536,19 @@ The Haiku check needs the terminal `claude` command to be signed in, the same as
 - **Waiting for Mac:** the display has never heard from the helper since it powered on. It shows its IP address and `claude-status.local` to help with debugging.
 - **Mac offline:** nothing has arrived for 30 seconds. Your Mac might be asleep, or the helper might have stopped. The cat naps on both of these screens until the Mac is back.
 - **Wi-Fi setup:** the display has no saved Wi-Fi, or can't reach it. Join `Claude-Monitor-Setup` from your phone. See [Option 2, step 2](#2-connect-the-display-to-your-wi-fi) for how to bring this screen back to change networks.
-- **Diagnostics:** tap the case **5 times** quickly. It shows the firmware version, the Wi-Fi network and its signal strength, the IP address and name, when the Mac last sent an update, and how long the display has been on. The ring counts down for 30 seconds, then it closes by itself. Double-tap to close it sooner.
+- **Diagnostics:** tap the case **5 times** quickly. It shows the firmware version, the Wi-Fi network and its signal strength, the IP address and name, when the Mac last sent an update, and how long the display has been on. The ring counts down for 30 seconds, then it closes by itself. Double-tap to close it sooner. It shows at normal brightness, even during night mode.
 
 ---
 
 ## Configuration
 
-### Mac helper: `claude-status/bridge/config.json`
+### Mac helper: `config.json`
 
-All keys are optional, and this file is git-ignored. Restart the helper after changing it:
+The helper keeps its settings in `config.json`, next to it: `~/Library/Application Support/Claude Monitor/config.json`, or `claude-status/bridge/config.json` if you installed from a git checkout, where it's git-ignored.
+
+The [menu bar app](#the-menu-bar-app) changes `plan_usage`, `cat`, `ci_checks`, `status_page`, `chat_alerts`, `check_replies` and the `night_` settings while the helper runs. It saves them here, and they take effect straight away.
+
+To change anything else, edit the file and restart the helper. All keys are optional. Keep the ones already there, especially `device_key`, the display's pairing key, which the helper adds by itself. On/off settings must be `true` or `false`; anything else, such as `"false"` or `0`, counts as the default.
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
@@ -481,7 +568,12 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | `ci_passed_window` | `600` | How long (seconds) checks that passed stay on screen. `0` keeps them while the session is open |
 | `status_page` | `true` | Check [Anthropic's status page](https://status.claude.com) every 2 minutes, and turn the ring red during incidents affecting Claude Code, the API or claude.ai |
 | `cat` | `true` | Show [the cat](#the-cat). `false` brings back the plain status screen, and the display stops walking the cat across at power-on |
-| `listen_port` | `47823` | Local port for hooks. If you change it, also update the URL in `hooks.py` and re-run `install.sh` |
+| `night_mode` | `false` | Turn the screen off or dim it overnight (see [Night mode](#night-mode)) |
+| `night_start` | `"22:00"` | When night starts: 24-hour `"HH:MM"`, by your Mac's clock |
+| `night_end` | `"07:00"` | When night ends. Earlier than `night_start` runs past midnight; the two can't be the same |
+| `night_screen` | `"off"` | `"off"` turns the screen off at night; `"dim"` keeps it very dim |
+| `night_alerts` | `true` | A session that needs you still lights the screen at night |
+| `listen_port` | `47823` | Local port for hooks, the chat connector and the menu bar app. If you change it, also update the URL in `hooks.py` and `chat_mcp.py`, then re-run `install.sh`, which passes the new port to the menu bar app |
 
 ### Firmware: top of `claude-status/firmware/src/main.cpp`
 
@@ -493,7 +585,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | `STALE_MS` | `30000` | How long (ms) without an update before showing *Mac offline* |
 | `TAP_G` | `0.25` | How firm each tap on the case must be, in g. Raise it if knocks on your desk dismiss alerts; lower it if your taps are missed. |
 | `DIAGNOSTICS_MS` | `30000` | How long (ms) the diagnostics screen stays up after 5 quick taps |
-| Brightness | `150` / `255` | Status screen / alert brightness, set at the end of `loop()` |
+| Brightness | `150` / `255` | Status screen / alert brightness. They're in `night.h`, with night mode's levels: alerts `150`, peek `80` for 15 s, and dim `10` |
 
 Re-flash after changing anything with `pio run -t upload`.
 
@@ -545,18 +637,42 @@ Alerts clear when the tool finishes, when you send a new prompt, or when Claude'
 <details>
 <summary><b>The ring is red and my usage is gone</b></summary>
 
-Anthropic's [status page](https://status.claude.com) is reporting an incident that affects Claude Code, the Claude API or claude.ai; its name scrolls under *Anthropic incident* at the top of the status screen. The ring goes back to normal once Anthropic marks the incident resolved. Incidents that only affect other services, such as the Console, don't count. If the helper can't reach the status page for 10 minutes, it stops showing the incident, so a problem with your own connection isn't blamed on Anthropic.
+Anthropic's [status page](https://status.claude.com) is reporting an incident that affects Claude Code, the Claude API or claude.ai; its name scrolls under *Anthropic incident* at the top of the status screen. The ring goes back to normal once Anthropic marks the incident resolved. Incidents that only affect other services, such as the Console, don't count. If the helper can't reach the status page for 10 minutes, it stops showing the incident, so a problem with your own connection isn't blamed on Anthropic. To stop showing incidents, switch off **Anthropic incidents** in the menu bar app.
 </details>
 
 <details>
 <summary><b>The usage rings are empty</b></summary>
 
-- Is `plan_usage` set to `true` in `config.json`? Did you restart the helper afterwards?
-- `tail ~/Library/Logs/claude-status-bridge.log`:
-  - **`no usable token` / `token rejected`:** run `claude auth login` in a terminal. The helper picks it up within 5 minutes.
-  - **`renewal call failed`:** the helper couldn't run `claude`. Check that `claude -p ok` works in a terminal.
-  - **`keychain read failed`:** you clicked *Deny* on the Keychain prompt. Restart the helper and click **Always Allow**.
+- Open the [menu bar app](#the-menu-bar-app): **Plan usage** says what's wrong.
+  - **Sign in to Claude in Terminal:** click **Sign in…**, or run `claude auth login` in a terminal.
+  - **macOS didn't allow access to "Claude Code-credentials" in the Keychain**, or **The Keychain didn't answer in time:** click **Try again**, then **Always Allow** when macOS asks. Otherwise the helper only asks again every 5 minutes.
+  - **Couldn't renew your Claude login (offline?):** the helper tries again in 5 minutes. If it keeps failing, check that `claude -p ok` works in a terminal.
+  - **Install Claude Code's terminal CLI:** the helper can't find the `claude` command. Install Claude Code's terminal command, then click **Try again**.
+- Without the menu bar app: is `plan_usage` set to `true` in `config.json`? Did you restart the helper afterwards? `tail ~/Library/Logs/claude-status-bridge.log` shows the same messages, e.g. `plan usage: signed out - Sign in to Claude in Terminal`.
 - Plan usage is only available for Claude Pro and Max subscriptions.
+</details>
+
+<details>
+<summary><b>I can't find the menu bar icon</b></summary>
+
+- A full menu bar, or the notch on a MacBook, can hide it. Open **Claude Monitor** from the Applications folder in your home folder, or find it with Spotlight. The same options open in a window.
+- If you clicked **Quit**, it stays closed until you next log in, or until you open it again from `~/Applications`.
+- Not in `~/Applications`? The installer skipped it and said why: it needs macOS 13 or later, and installing from a git checkout needs Swift 6. Its log is `~/Library/Logs/claude-monitor-menubar.log`.
+</details>
+
+<details>
+<summary><b>The menu bar app says the helper isn't running</b></summary>
+
+Click **Start helper**. If it doesn't start, **Open Log** shows why, and running the installer again sets it up again: the [install line](#option-2-one-line-in-terminal-no-coding), or `install.sh` from a git checkout.
+</details>
+
+<details>
+<summary><b>Night mode doesn't darken the screen</b></summary>
+
+1. If the menu bar app says *Update the display to use night mode*, the display's firmware is older than night mode. [Update it](#updating).
+2. Check the times: they're 24-hour, by your Mac's clock. The panel says **On now** while it's night.
+3. A session that needs you still lights the screen, unless you switch off **Alerts still light it up**.
+4. Open `http://claude-status.local/` in a browser. The night mode line shows the hours the display has, whether it's night there (`on now`) and the backlight level. Until the display knows the time, it's always day.
 </details>
 
 <details>
@@ -587,11 +703,13 @@ Close anything else using the serial port, such as `pio device monitor` or the A
 | What | How |
 |---|---|
 | See exactly what the helper is sending | `curl -s http://127.0.0.1:47823/state \| jq` |
+| The settings and status the menu bar app sees | `curl -s http://127.0.0.1:47823/settings \| jq` |
 | One-off snapshot without the service | `python3 claude-status/bridge/claude_status_bridge.py --once` |
 | Screenshot of the display | Open `http://claude-status.local/screen.bmp` in a browser |
-| Display's own status page, including the taps it has seen | `http://claude-status.local/` |
+| Display's own status page, including the taps it has seen and night mode | `http://claude-status.local/` |
 | Diagnostics on the display itself: version, Wi-Fi, IP | Tap the case 5 times quickly |
 | Helper log | `tail -f ~/Library/Logs/claude-status-bridge.log` |
+| Menu bar app log | `tail ~/Library/Logs/claude-monitor-menubar.log` |
 
 ---
 
@@ -601,10 +719,11 @@ It's your Claude activity, so here's exactly what this project touches:
 
 - **Hooks** send event data (session ID, tool name and tool input such as the command being run) **only to `127.0.0.1`**, the helper on your own Mac.
 - **The helper reads** `~/.claude/sessions/` (session names and busy/idle state) and your transcript files in `~/.claude/projects/` (token counts and prompt *counts* only; it doesn't keep your messages).
-- **The display receives** session names, short details such as `Bash: npm test`, counts and usage percentages, over your local Wi-Fi.
+- **The display receives** session names, short details such as `Bash: npm test`, counts and usage percentages, your night mode hours and your Mac's clock, over your local Wi-Fi.
+- **The helper's local API**, which the hooks, the chat connector and the menu bar app use, only listens on `127.0.0.1`, so nothing else on your network can reach it. It also turns away requests from web pages: it refuses any request with an `Origin` header, which browsers add, or with a `Host` other than `127.0.0.1` or `localhost`, which stops a website pointing its own name at your Mac (DNS rebinding). It never hands out the display's pairing key or your Claude sign-in.
 - **Chat alerts:** the helper reads the Claude app's chat-window log (`~/Library/Logs/Claude/claude.ai-web.log`), but only the tool approval lines, which contain a tool name. The connector sends the short question and chat title Claude gives it to the helper on `127.0.0.1`, and from there to the display.
 - **Reply checks:** when a Claude Code turn ends without an obvious question, the last 3,000 characters of Claude's reply are sent to Claude Haiku, through your own `claude` sign-in, to ask whether it's waiting on you. Turn this off with `"check_replies": false`.
-- **Plan usage (opt-in only)** reads the terminal `claude` login's token from your Keychain and sends it **only to `api.anthropic.com`**. When the token expires, the helper runs one tiny `claude -p ok` request so the CLI renews it.
+- **Plan usage (opt-in only, with Connect in the menu bar app)** reads the terminal `claude` login's token from your Keychain and sends it **only to `api.anthropic.com`**. When the token expires, the helper runs one tiny `claude -p ok` request so the CLI renews it.
 - **CI checks:** for the session you have open in the Claude app, the helper runs `gh pr view` in that session's folder, which asks **GitHub** about the branch's pull request using your own `gh` sign-in. The display gets the pull request's number and title, and the names and results of its checks. Turn this off with `"ci_checks": false`.
 - **Anthropic's status page:** every 2 minutes the helper downloads the public summary from `status.claude.com`. The request carries nothing about you or your sessions. Turn this off with `"status_page": false`.
 - **Nothing else leaves your Mac.** There's no telemetry, cloud service or account.
@@ -617,11 +736,15 @@ It's your Claude activity, so here's exactly what this project touches:
 
 ## Uninstalling
 
+If you installed with the Terminal line or `Install.command`, run this in Terminal:
+
 ```bash
-./claude-status/bridge/uninstall.sh
+"$HOME/Library/Application Support/Claude Monitor/Uninstall.command"
 ```
 
-This stops and removes the background service, takes our hooks back out of `~/.claude/settings.json`, removes the `claude-status` connector from the Claude app and the `update-claude-monitor` skill. It saves backups first, and leaves your other hooks and connectors alone. The display then shows *Mac offline* until you re-flash it with something else.
+`Uninstall.command` from the Mac zip does the same, and so does `./claude-status/bridge/uninstall.sh` from a git checkout.
+
+This stops and removes the background service and the menu bar app (`~/Applications/Claude Monitor.app` and its log), takes our hooks back out of `~/.claude/settings.json`, removes the `claude-status` connector from the Claude app and the `update-claude-monitor` skill. It saves backups first, and leaves your other hooks and connectors alone. The display then shows *Mac offline* until you re-flash it with something else.
 
 Also remove the `waiting_for_user` line from your Claude personal preferences. To sign the terminal out as well, run `claude auth logout`.
 
@@ -681,21 +804,28 @@ python3 designs.py        # writes designs/*.stl and prints fit, stability and o
 │   │   ├── update.py / update.sh    # updates the helper and the display (over Wi-Fi)
 │   │   ├── update-skill.md          # the update-claude-monitor skill the installer adds
 │   │   ├── hooks.py                 # adds/removes hooks in ~/.claude/settings.json
-│   │   ├── install.sh               # launchd agent + hooks + connector
+│   │   ├── install.sh               # launchd agent + hooks + connector + menu bar app
 │   │   └── uninstall.sh
+│   ├── menubar/                     # menu bar app (SwiftUI, no Xcode project needed)
+│   │   ├── build.sh                 # builds "Claude Monitor.app" with swiftc
+│   │   ├── Info.plist
+│   │   └── Sources/                 # the panel, the helper's API, --snapshot for screenshots
 │   ├── package/                     # what users download
-│   │   ├── Install.command          # double-click Mac installer
+│   │   ├── Install.command          # the installer: display over USB, then the Mac
+│   │   ├── flash-display.sh         # puts the firmware on the display with Espressif's esptool
 │   │   ├── Update.command
 │   │   ├── Uninstall.command
-│   │   └── web/index.html           # browser installer page (ESP Web Tools)
+│   │   ├── web/index.html           # browser installer page (ESP Web Tools)
+│   │   └── web/install.sh           # the one-line Mac install: downloads the zip, runs Install.command
 │   └── firmware/                    # ESP32-S3 firmware (PlatformIO + Arduino)
 │       ├── platformio.ini
 │       └── src/
 │           ├── main.cpp
 │           ├── cat.cpp / .h         # the tabby on the status screen: pixel-art poses and animations
 │           ├── taps.cpp / .h        # taps on the case (double tap, 5 taps), via the motion sensor
+│           ├── night.cpp / .h       # night mode: when the screen goes dark, and how bright it is
 │           └── secrets.h.example
-├── tools/build-release.sh           # builds dist/: firmware, Mac zip, installer page
+├── tools/build-release.sh           # builds dist/: firmware, Mac zip with the menu bar app, installer page
 ├── .github/workflows/release.yml    # on a v* tag: build, publish release + installer page
 ├── stand/                           # 3D-printable desk stands
 │   ├── make_stand.py                # shared ring + design 9 -> designs/9-automotive.stl
@@ -703,6 +833,8 @@ python3 designs.py        # writes designs/*.stl and prints fit, stability and o
 │   └── designs/                     # ready-to-print STLs and preview images
 └── docs/images/                     # screenshots used in this README
 ```
+
+`tools/build-release.sh` needs a Mac with Xcode, or the Command Line Tools 16 or later, because the Mac zip includes the menu bar app. The menu bar app's picture comes from `"Claude Monitor.app/Contents/MacOS/Claude Monitor" --snapshot docs/images/menubar.png --fixture connected`.
 
 ---
 

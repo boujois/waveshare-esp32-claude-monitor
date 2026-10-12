@@ -5,14 +5,16 @@
     update.sh --check         only report what's installed and what's available
     update.sh --firmware      update the display even if it's on the latest version
 
-The Mac helper is updated from the release's Claude-Monitor-Mac.zip (your config.json
-is kept). The display is updated over Wi-Fi from the release's claude-monitor-app.bin,
-using the key the helper paired with it. Standard library only.
+The Mac helper and its menu bar app are updated from the release's Claude-Monitor-Mac.zip
+(your config.json is kept). The display is updated over Wi-Fi from the release's
+claude-monitor-app.bin, using the key the helper paired with it. Standard library only.
 """
 
 import argparse
+import fcntl
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -38,6 +40,32 @@ def download(url):
         return r.read()
 
 
+def extract(zip_path, dest):
+    """Like ZipFile.extractall, but keeps file permissions and symlinks, which extractall
+    drops and the menu bar app needs (its executable, mainly)."""
+    links = []
+    with zipfile.ZipFile(zip_path) as z:
+        for info in z.infolist():
+            mode = info.external_attr >> 16
+            path = z.extract(info, dest)
+            if stat.S_ISLNK(mode):
+                links.append((path, os.fsdecode(Path(path).read_bytes())))  # the contents are the target
+                os.remove(path)
+            elif mode & 0o777 and not info.is_dir():
+                os.chmod(path, mode & 0o777)
+    # Links last, so nothing gets extracted through one
+    for path, target in links:
+        os.symlink(target, path)
+
+
+def replace_dir(src, dest):
+    if dest.is_symlink() or dest.is_file():
+        dest.unlink()
+    elif dest.exists():
+        shutil.rmtree(dest)
+    shutil.copytree(src, dest, symlinks=True)
+
+
 def update_helper(release):
     """Replaces the helper files with the release's and re-runs install.sh."""
     zip_url = release["assets"].get("Claude-Monitor-Mac.zip")
@@ -47,14 +75,18 @@ def update_helper(release):
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "mac.zip"
         path.write_bytes(download(zip_url))
-        with zipfile.ZipFile(path) as z:
-            z.extractall(tmp)
+        extract(path, tmp)
         src = Path(tmp) / "Claude Monitor" / "helper"
         if not src.is_dir():
             say("✗ Unexpected zip layout")
             return False
         for f in src.iterdir():
-            if f.name not in KEEP and f.is_file():
+            if f.name in KEEP:
+                continue
+            if f.suffix == ".app" and f.is_dir() and not f.is_symlink():
+                # App bundles (the menu bar app) are replaced whole; install.sh installs them
+                replace_dir(f, HERE / f.name)
+            elif f.is_file():
                 shutil.copy2(f, HERE / f.name)
                 if f.suffix == ".sh":
                     os.chmod(HERE / f.name, 0o755)
@@ -63,6 +95,9 @@ def update_helper(release):
     if res.returncode != 0:
         say("✗ Reinstalling the helper failed:\n" + (res.stderr or res.stdout))
         return False
+    # install.sh carries on when an optional part (the menu bar app) has trouble, saying why on stderr
+    if res.stderr.strip():
+        say("! " + res.stderr.strip().replace("\n", "\n  "))
     return True
 
 
@@ -130,6 +165,16 @@ def main():
     ap.add_argument("--check", action="store_true", help="only report versions")
     ap.add_argument("--firmware", action="store_true", help="update the display even if it's up to date")
     args = ap.parse_args()
+
+    # One update at a time: two would trip over each other replacing files and reinstalling,
+    # and both would send firmware to the display. Held until this process exits
+    if not args.check:
+        lock = open(HERE / ".update.lock", "a")
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            say("An update is already running in another Terminal window.")
+            return 1
 
     cfg = cs.load_config(argparse.Namespace(device=None, plan_usage=False))
     try:
