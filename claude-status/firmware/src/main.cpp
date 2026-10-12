@@ -3,7 +3,8 @@
 //
 // The Mac bridge (../bridge) POSTs a JSON summary to http://claude-status.local/state.
 // When a session needs input the screen shows a full-screen alert; otherwise it shows
-// session status, plan usage rings (5-hour outer, weekly inner) and today's activity.
+// session status, plan usage rings (5-hour outer, weekly inner) and today's activity, with a
+// tabby cat acting out what's going on (see cat.cpp). The cat also walks across at power-on.
 // Double-tapping the case dismisses the alert or Done card on screen, as does a short press of the
 // BOOT button if your case leaves it reachable; tapping it five times quickly shows diagnostics
 // (see taps.cpp). Holding BOOT for 5 seconds forgets the Wi-Fi network and reopens Wi-Fi setup.
@@ -34,6 +35,7 @@
 #include <utility>
 #include <vector>
 
+#include "cat.h"
 #include "taps.h"
 
 #if __has_include("secrets.h") && !defined(RELEASE_BUILD)  // never in release images
@@ -350,14 +352,15 @@ struct State {
   bool valid = false;
   uint32_t rxMillis = 0;
   std::vector<Session> sessions;
-  int busy = 0, idle = 0, waiting = 0, done = 0;
+  int busy = 0, idle = 0, waiting = 0, done = 0, errors = 0;
   bool haveUsage = false;
   float h5 = -1, d7 = -1;
   uint32_t h5Reset = 0, d7Reset = 0;
   bool haveToday = false;
   double tokens = 0;
   uint32_t prompts = 0;
-  String update;  // newer release available, e.g. "v1.1.0"
+  String update;    // newer release available, e.g. "v1.1.0"
+  String incident;  // an Anthropic incident affecting Claude Code, from status.claude.com
   CI ci;
 };
 
@@ -406,6 +409,7 @@ static int parseHHMM(const String &v) {  // "23:00" or "23" -> minutes, or -1
 static String currentTz;
 static uint8_t powerCycles = 0;  // consecutive quick power-ons, for the no-button Wi-Fi reset
 static String pairKey;           // shared with the Mac helper; required for firmware updates
+static bool showCat = true;      // the cat and its power-on walk ("cat" in the helper's config.json)
 
 static void applyTimezone(const String &tz) {
   currentTz = tz;
@@ -437,6 +441,7 @@ static void handleState() {
   s.idle = c["idle"] | 0;
   s.waiting = c["waiting"] | 0;
   s.done = c["done"] | 0;
+  s.errors = c["error"] | 0;
   JsonObject u = doc["usage"];
   if (!u.isNull()) {
     s.haveUsage = true;
@@ -463,6 +468,7 @@ static void handleState() {
     s.ci.since = ci["since"] | 0;
   }
   s.update = (const char *)(doc["update"] | "");
+  if (!doc["incident"].isNull()) s.incident = (const char *)(doc["incident"]["name"] | "Claude incident");
   st = std::move(s);
 
   // The Mac helper sends its timezone as a POSIX TZ string; remember it across reboots
@@ -471,6 +477,13 @@ static void handleState() {
     applyTimezone(tz);
     prefs.putString("tz", tz);
     Serial.println("Timezone set to " + tz);
+  }
+
+  // Remembered too, so the power-on walk follows it before the Mac is heard from
+  bool cat = doc["cat"] | true;
+  if (cat != showCat) {
+    showCat = cat;
+    prefs.putBool("cat", cat);
   }
   server.send(200, "application/json", "{\"ok\":true}");
 }
@@ -677,6 +690,23 @@ static void text(const String &s, int x, int y, uint32_t col, const lgfx::IFont 
 
 static float pulse(float periodMs) { return 0.5f + 0.5f * sinf(millis() * TWO_PI / periodMs); }
 
+// A line of Font2 text centred at height y; if it's wider than w, it scrolls sideways through
+// that width like a ticker, so all of it can be read
+static void ticker(const String &s, int y, int w, uint32_t col) {
+  frame.setFont(&fonts::Font2);
+  int tw = frame.textWidth(s);
+  if (tw <= w) {
+    text(s, CX, y, col, &fonts::Font2);
+    return;
+  }
+  const int gap = 48, x0 = CX - w / 2;
+  int off = (millis() / 30) % (tw + gap);  // ~33 px a second
+  frame.setClipRect(x0, y - 9, w, 18);
+  text(s, x0 - off, y, col, &fonts::Font2, textdatum_t::middle_left);
+  text(s, x0 - off + tw + gap, y, col, &fonts::Font2, textdatum_t::middle_left);
+  frame.clearClipRect();
+}
+
 // ---- Screens ----
 
 static const char *headline(const String &kind) {
@@ -848,8 +878,16 @@ static void drawStatus(bool stale) {
   bool live = st.valid && !stale;
   bool usage = live && st.haveUsage;
 
-  ring(108, 118, usage ? st.h5 : 0, usageColor(st.h5, COL_CLAUDE));
-  ring(96, 104, usage ? st.d7 : 0, usageColor(st.d7, COL_WEEK));
+  // During an Anthropic incident, a red ring and the incident take the place of plan usage, so
+  // red error dots can be read as Anthropic's problem rather than yours
+  bool incident = live && st.incident.length();
+  if (incident) {
+    frame.fillArc(CX, CY, 106, 119, 0, 360, lerpColor(0x5A1612, COL_ERR, 0.3f + 0.5f * pulse(3000)));
+    usage = false;
+  } else {
+    ring(108, 118, usage ? st.h5 : 0, usageColor(st.h5, COL_CLAUDE));
+    ring(96, 104, usage ? st.d7 : 0, usageColor(st.d7, COL_WEEK));
+  }
 
   time_t now = time(nullptr);
   if (now > 1700000000) {
@@ -867,11 +905,18 @@ static void drawStatus(bool stale) {
   }
 
   if (!live) {
+    if (showCat) drawCat(frame, CX - CAT_W / 2, 62, CatMood::Sleeping);
     text(st.valid ? "Mac offline" : "Waiting for Mac", CX, 110, COL_DIM, &fonts::FreeSansBold9pt7b);
     String ip = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : String("Wi-Fi...");
     text(ip, CX, 136, COL_FAINT, &fonts::Font2);
     text(String(HOSTNAME) + ".local", CX, 154, COL_FAINT, &fonts::Font2);
     return;
+  }
+
+  if (incident) {
+    frame.setFont(&fonts::Font2);
+    text(firstFit({"Anthropic incident", "Incident"}, chordWidth(62, STATUS_TEXT_R)), CX, 62, COL_ERR, &fonts::Font2);
+    ticker(st.incident, 78, chordWidth(78, STATUS_TEXT_R), COL_DIM);
   }
 
   // Plan usage labels (5h left, weekly right). Underneath: when you'd run out at this pace, if
@@ -889,20 +934,33 @@ static void drawStatus(bool stale) {
     }
   }
 
-  // Headline
+  // Headline, with the cat acting it out beside it unless it's turned off
   String head;
   uint32_t headCol;
+  CatMood mood;
   if (st.waiting > 0) {  // the alert was dismissed
     head = String(st.waiting) + " waiting";
     headCol = lerpColor(COL_CLAUDE, COL_BRIGHT, pulse(1600));
+    mood = CatMood::Waving;
   } else if (st.busy > 0) {
     head = String(st.busy) + " working";
     headCol = COL_TEXT;
+    mood = CatMood::Working;
   } else {
     head = st.done > 0 ? "All done" : "All idle";
     headCol = st.done > 0 ? COL_OK : COL_DIM;
+    mood = st.errors > 0 ? CatMood::Dizzy : st.done > 0 ? CatMood::Cheering : CatMood::Sleeping;
   }
-  text(head, CX, 104, headCol, &fonts::FreeSansBold12pt7b);
+  if (showCat) {
+    const int catGap = 4;
+    frame.setFont(&fonts::FreeSansBold12pt7b);
+    head = fit(head, chordWidth(104, STATUS_TEXT_R) - CAT_W - catGap);
+    int headX = CX - (CAT_W + catGap + frame.textWidth(head)) / 2;
+    drawCat(frame, headX, 104 - CAT_H / 2, mood, st.busy);
+    text(head, headX + CAT_W + catGap, 104, headCol, &fonts::FreeSansBold12pt7b, textdatum_t::middle_left);
+  } else {
+    text(head, CX, 104, headCol, &fonts::FreeSansBold12pt7b);
+  }
 
   // Up to three active sessions, each with a status dot; working ones show how long they've been at it
   int y = 130, shown = 0;
@@ -1156,6 +1214,17 @@ static Pick pickCard(bool stale) {
 
 static bool checkPowerCycleReset();
 
+// At power-on, the cat walks across the empty screen before anything else appears
+static void catWalk() {
+  uint32_t start = millis();
+  while (true) {
+    frame.fillScreen(COL_BG);
+    if (!drawCatWalk(frame, millis() - start)) break;
+    frame.pushSprite(0, 0);
+    delay(10);
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   pinMode(PIN_BOOT, INPUT_PULLUP);
@@ -1192,14 +1261,17 @@ void setup() {
   lcd.setWhiteBalance(prefs.getUChar("wbR", TRGB_WB_R), prefs.getUChar("wbG", TRGB_WB_G), prefs.getUChar("wbB", TRGB_WB_B));
 #endif
   pairKey = prefs.getString("key", "");
+  showCat = prefs.getBool("cat", true);
   String savedTz = prefs.getString("tz", DEFAULT_TZ);
   configTzTime(savedTz.c_str(), "pool.ntp.org", "time.google.com");
   applyTimezone(savedTz);
 
-  checkPowerCycleReset();
+  bool wifiReset = checkPowerCycleReset();
   if (powerCycles == RESET_POWER_CYCLES - 1) {
     drawMessage("Reset Wi-Fi?", "Unplug and replug once more", COL_WARN);
     delay(2500);
+  } else if (!wifiReset && showCat) {
+    catWalk();
   }
 
   WiFi.mode(WIFI_STA);
