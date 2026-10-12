@@ -13,3 +13,6 @@ claude-status/bridge/config.json
 
 # Release builds (tools/build-release.sh)
 dist/
+
+# Held while update.sh runs
+claude-status/bridge/.update.lock

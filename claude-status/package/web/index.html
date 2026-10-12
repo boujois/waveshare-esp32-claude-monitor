@@ -38,6 +38,11 @@
       padding: 12px 28px; font-size: 17px; font-weight: 600; cursor: pointer; }
     .warn { background: var(--warn-bg); border-radius: 10px; padding: 10px 14px; font-size: 14px; }
     code { background: var(--line); border-radius: 5px; padding: 1px 6px; font-size: 14px; }
+    .cmd { display: flex; gap: 8px; margin: 10px 0; min-width: 0; }
+    .cmd code { flex: 1; min-width: 0; display: block; padding: 10px 12px; font-size: 13px;
+                overflow-x: auto; white-space: nowrap; }
+    .copy { flex: none; border: 1px solid var(--line); background: var(--card); color: var(--text);
+            border-radius: 8px; padding: 0 14px; font: inherit; font-size: 14px; cursor: pointer; }
     a { color: var(--accent); }
   </style>
 </head>
@@ -47,6 +52,19 @@
     <div class="dot">?</div>
     <h1>Claude Monitor installer</h1>
     <p class="sub">Set up the round desk display that lights up when Claude needs you.</p>
+  </div>
+
+  <div class="card">
+    <h2>On a Mac? One line does it all</h2>
+    <p>Plug the display into your Mac, open <b>Terminal</b> (in Applications &rarr; Utilities),
+       paste this line and press Return:</p>
+    <div class="cmd">
+      <code id="mac-all">/bin/bash -c "$(curl -fsSL https://boujois.github.io/waveshare-esp32-claude-monitor/install.sh)"</code>
+      <button type="button" class="copy" data-copy="mac-all">Copy</button>
+    </div>
+    <p class="muted">It puts the software on the display, tells you when to connect it to your
+       Wi-Fi, and sets up your Mac, with no browser needed. Or follow the steps below in
+       Chrome or Edge.</p>
   </div>
 
   <div class="card step">
@@ -96,17 +114,42 @@
 
   <div class="card step">
     <div class="num">4</div>
-    <div>
+    <div style="flex:1; min-width:0">
       <h2>Set up your Mac</h2>
-      <p>Download <b>Claude-Monitor-Mac.zip</b> from the
-         <a href="https://github.com/boujois/waveshare-esp32-claude-monitor/releases/latest">latest release</a>,
-         open it, then right-click <b>Install.command</b> and choose <b>Open</b>.</p>
+      <p>Open <b>Terminal</b> (in Applications &rarr; Utilities), paste this line and press Return.
+         It's the same line as at the top: it sees the display is set up and goes straight to
+         your Mac.</p>
+      <div class="cmd">
+        <code id="mac-install">/bin/bash -c "$(curl -fsSL https://boujois.github.io/waveshare-esp32-claude-monitor/install.sh)"</code>
+        <button type="button" class="copy" data-copy="mac-install">Copy</button>
+      </div>
+      <p>It installs the Mac helper and menu bar app from the
+         <a href="https://github.com/boujois/waveshare-esp32-claude-monitor/releases/latest">latest release</a>
+         and asks a few questions. Then click the Claude Monitor icon in the menu bar, a small circle
+         inside a circle, to connect your plan usage and set up night mode.</p>
       <p class="muted">The display switches from "Waiting for Mac" to your Claude status within a few seconds.</p>
+      <p class="muted">Rather not use Terminal? Download <b>Claude-Monitor-Mac.zip</b> from the latest
+         release, open it and double-click <b>Install.command</b>. macOS stops it the first time: click
+         <b>Done</b>, then open <b>System Settings &rarr; Privacy &amp; Security</b> and click <b>Open Anyway</b>.</p>
     </div>
   </div>
 
   <p class="muted" style="text-align:center">Need to change Wi-Fi later? Unplug the display and
      plug it back in <b>3 times in a row</b>, each within 10 seconds of the last, to reopen Wi-Fi setup.</p>
 </main>
+<script>
+  for (const button of document.querySelectorAll("[data-copy]")) {
+    button.addEventListener("click", async () => {
+      const text = document.getElementById(button.dataset.copy).textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "Copied";
+      } catch {
+        button.textContent = "Select it to copy";
+      }
+      setTimeout(() => (button.textContent = "Copy"), 2000);
+    });
+  }
+</script>
 </body>
 </html>

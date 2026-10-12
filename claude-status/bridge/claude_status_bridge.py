@@ -10,6 +10,11 @@ ESP32 status display over Wi-Fi:
   * plan limits (opt-in)   5-hour / weekly usage from Anthropic's OAuth usage endpoint
   * CI checks              the pull request for the session open in the Claude app (GitHub CLI)
   * Anthropic incidents    status.claude.com, for incidents affecting Claude Code
+  * night mode (opt-in)    hours when the display's screen goes dark or dims
+
+The Claude Monitor menu bar app changes these options while the helper runs, through
+GET/POST /settings, POST /usage/connect and POST /usage/refresh on the same port.
+Changes are saved to config.json and take effect within a second, without a restart.
 
 Standard library only. Run directly or via the launchd agent (see install.sh).
 """
@@ -20,6 +25,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import tempfile
 import socket
 import subprocess
@@ -58,20 +64,48 @@ DEFAULT_CONFIG = {
     # Anthropic's public status page: incidents affecting Claude Code turn the display's ring red
     "status_page": True,
     "cat": True,  # the tabby cat on the display; false for the plain status screen
+    # Night mode: between night_start and night_end (24-hour, this Mac's time; wraps past
+    # midnight) the screen turns off, or dims with night_screen "dim". With night_alerts,
+    # a session that needs you still lights it up.
+    "night_mode": False,
+    "night_start": "22:00",
+    "night_end": "07:00",
+    "night_screen": "off",
+    "night_alerts": True,
 }
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 PROJECT_REPO = "boujois/waveshare-esp32-claude-monitor"
 INSTALLER_SITE = "https://boujois.github.io/waveshare-esp32-claude-monitor"
+HELPER_DIR = Path(__file__).resolve().parent
 VERSION_PATH = Path(__file__).with_name("VERSION")  # written into release packages
-# launchd agents don't get the login shell's PATH
-CLAUDE_CLI = shutil.which("claude") or str(Path.home() / ".local/bin/claude")
-RENEW_INTERVAL = 30 * 60  # at most one renewal attempt per 30 minutes
+LOG_PATH = Path.home() / "Library/Logs/claude-status-bridge.log"  # where install.sh's agent logs
+RENEW_INTERVAL = 30 * 60  # at most one renewal attempt per 30 minutes...
+RENEW_RETRY = 5 * 60  # ...or 5 minutes after one that failed
 MAX_SESSIONS_SENT = 8
 
 
 def log(*args):
     print(datetime.now().strftime("%H:%M:%S"), *args, flush=True)
+
+
+def claude_cli():
+    """The terminal `claude` CLI, or None if it isn't installed. Looked up each time, so
+    installing it while the helper runs works. launchd agents don't get the login shell's
+    PATH, so the usual install locations are tried too."""
+    home = Path.home()
+    for p in (shutil.which("claude"), home / ".local/bin/claude", home / ".claude/local/claude",
+              "/opt/homebrew/bin/claude", "/usr/local/bin/claude"):
+        if p and os.path.isfile(p) and os.access(p, os.X_OK):
+            return str(p)
+    return None
+
+
+def cli_env(cli):
+    """The environment to run the `claude` CLI in. An npm install is a `node` script, and launchd's
+    PATH has only the system folders, so the CLI's own folder and Homebrew's come first."""
+    path = [os.path.dirname(cli), "/opt/homebrew/bin", "/usr/local/bin", os.environ.get("PATH", "")]
+    return {**os.environ, "PATH": os.pathsep.join(p for p in path if p)}
 
 
 def ascii_text(s, limit=80):
@@ -147,15 +181,16 @@ def check_reply(text):
     ("done", what was done), or None if the check couldn't run (e.g. the terminal
     `claude` isn't signed in)."""
     global _classify_off_until
-    if not text or time.time() < _classify_off_until:
+    cli = claude_cli()
+    if not text or not cli or time.time() < _classify_off_until:
         return None
     prompt = f"<message>\n{text[-3000:]}\n</message>\nIs the user being asked to do something? Answer in one line."
-    cmd = [CLAUDE_CLI, "-p", prompt, "--model", "haiku", "--no-session-persistence",
+    cmd = [cli, "-p", prompt, "--model", "haiku", "--no-session-persistence",
            "--tools", "", "--strict-mcp-config", "--system-prompt", _CLASSIFY_PROMPT,
            "--setting-sources", "project", "--disable-slash-commands"]
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            res = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, timeout=90)
+            res = subprocess.run(cmd, cwd=tmp, env=cli_env(cli), capture_output=True, text=True, timeout=90)
     except (OSError, subprocess.TimeoutExpired) as e:
         res = None
         log("reply check failed:", e)
@@ -849,31 +884,43 @@ def current_incident():
 class IncidentWatcher:
     """Checks Anthropic's status page every 2 minutes in the background. An incident shows until
     Anthropic resolves it; if the page can't be reached for 10 minutes, it stops showing, so a
-    problem with your own connection isn't blamed on Anthropic."""
+    problem with your own connection isn't blamed on Anthropic. Paused while the status_page
+    option is off."""
 
     INTERVAL, GIVE_UP = 120, 600
 
     def __init__(self):
         self.incident = None
         self.checked = 0  # when the page last answered
+        self.enabled = True
+        self.wake = threading.Event()
         threading.Thread(target=self._run, daemon=True).start()
+
+    def set_enabled(self, on):
+        """Pauses or resumes checking; turned back on, it checks straight away."""
+        if on != self.enabled:
+            self.enabled = on
+            self.checked = 0  # the last answer is out of date by the time it's back on
+            self.wake.set()
 
     def _run(self):
         last_name, failing = "", False  # "" so the first check is always logged
         while True:
-            try:
-                self.incident = current_incident()
-                self.checked = time.time()
-                failing = False
-            except (OSError, ValueError) as e:
-                if not failing:
-                    log("status page check failed:", e)
-                failing = True
-            name = self.snapshot() and self.incident["name"]
-            if name != last_name:
-                log(f"Anthropic status: {name or 'no incident affecting Claude Code'}")
-                last_name = name
-            time.sleep(self.INTERVAL)
+            self.wake.clear()
+            if self.enabled:
+                try:
+                    self.incident = current_incident()
+                    self.checked = time.time()
+                    failing = False
+                except (OSError, ValueError) as e:
+                    if not failing:
+                        log("status page check failed:", e)
+                    failing = True
+                name = self.snapshot() and self.incident["name"]
+                if name != last_name:
+                    log(f"Anthropic status: {name or 'no incident affecting Claude Code'}")
+                    last_name = name
+            self.wake.wait(self.INTERVAL if self.enabled else None)
 
     def snapshot(self):
         return self.incident if time.time() - self.checked < self.GIVE_UP else None
@@ -894,25 +941,40 @@ def _epoch(v):
     return 0
 
 
+class KeychainBlocked(Exception):
+    """macOS didn't hand over the `claude` login: its access prompt was denied or went unanswered."""
+
+
 def _keychain_password(service):
-    res = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
-                         capture_output=True, text=True, timeout=15)
-    return res.stdout.strip() if res.returncode == 0 else None
+    """A password from the login Keychain, or None if there's no such item. Raises
+    KeychainBlocked when macOS's access prompt is denied or not answered."""
+    # Runs on the usage thread, so a macOS access prompt can wait a minute for a click
+    try:
+        res = subprocess.run(["security", "find-generic-password", "-s", service, "-w"],
+                             capture_output=True, text=True, timeout=60)
+    except subprocess.TimeoutExpired:
+        raise KeychainBlocked("The Keychain didn't answer in time") from None
+    if res.returncode == 44:  # errSecItemNotFound: never signed in on this Mac
+        return None
+    if res.returncode != 0:  # Deny clicked, the prompt cancelled, or the Keychain locked
+        raise KeychainBlocked(f'macOS didn\'t allow access to "{service}" in the Keychain')
+    return res.stdout.strip()
 
 
 def _cli_login_token():
-    """Access token of the terminal `claude` login, if it hasn't expired."""
+    """(access token, has login) for the terminal `claude` login, from one Keychain read: the
+    token is None once it has expired, and has login says whether the CLI can renew it."""
     raw = _keychain_password("Claude Code-credentials")
     if not raw:
-        return None
+        return None, False
     try:
         oauth = (json.loads(raw) or {}).get("claudeAiOauth") or {}
     except json.JSONDecodeError:
-        return None
+        return None, False
     token, expires = oauth.get("accessToken"), (oauth.get("expiresAt") or 0) / 1000
     if not token or (expires and expires < time.time() + 60):
-        return None
-    return token
+        token = None
+    return token, bool(oauth.get("refreshToken"))
 
 
 def request_plan_usage(token):
@@ -937,49 +999,191 @@ def request_plan_usage(token):
 
 
 _last_renew = 0
+_renew_failed = False  # the last renewal attempt failed in a way worth retrying soon (offline, say)
 
 
 def _renew_cli_login():
     """Gets the `claude` CLI to renew its expired access token by making one tiny,
     isolated request on Haiku: no tools, connectors, settings/hooks or saved session.
-    The CLI does the renewal itself, so its credentials stay consistent."""
-    global _last_renew
-    if time.time() - _last_renew < RENEW_INTERVAL:
+    The CLI does the renewal itself, so its credentials stay consistent.
+    At most once per RENEW_INTERVAL, or RENEW_RETRY after one that failed (unless the CLI
+    said to sign in again, which retrying won't fix)."""
+    global _last_renew, _renew_failed
+    cli = claude_cli()
+    if not cli or time.time() - _last_renew < RENEW_INTERVAL:
         return False
-    _last_renew = time.time()
-    cmd = [CLAUDE_CLI, "-p", "ok", "--model", "haiku", "--no-session-persistence", "--tools", "",
+    _last_renew, _renew_failed = time.time(), False
+    cmd = [cli, "-p", "ok", "--model", "haiku", "--no-session-persistence", "--tools", "",
            "--strict-mcp-config", "--system-prompt", "Reply with just: ok",
            "--setting-sources", "project", "--disable-slash-commands"]
     try:
         with tempfile.TemporaryDirectory() as tmp:
-            res = subprocess.run(cmd, cwd=tmp, capture_output=True, text=True, timeout=120)
+            res = subprocess.run(cmd, cwd=tmp, env=cli_env(cli), capture_output=True, text=True, timeout=120)
     except (OSError, subprocess.TimeoutExpired) as e:
         log("plan usage: renewal call failed:", e)
-        return False
-    if res.returncode != 0:
+        out = ""
+    else:
+        if res.returncode == 0:
+            return True
+        out = res.stderr + res.stdout
         log("plan usage: renewal call failed:", (res.stderr or res.stdout).strip()[:200])
-        return False
-    return True
+    if "/login" not in out and "log in" not in out.lower():  # offline, say: worth another go soon
+        _renew_failed = True
+        _last_renew = time.time() - RENEW_INTERVAL + RENEW_RETRY
+    return False
+
+
+class SignedOut(Exception):
+    """There's no usable `claude` login to read plan usage with; the message says what to do."""
 
 
 def fetch_plan_usage():
     """Plan limits, using the terminal `claude` login's token (sign in once with
     `claude auth login`). When it has expired, the CLI is asked to renew it.
-    The token is only ever sent to Anthropic and never refreshed or rewritten here."""
-    token = _cli_login_token()
-    if not token and _renew_cli_login():
-        token = _cli_login_token()
+    The token is only ever sent to Anthropic and never refreshed or rewritten here.
+    Raises SignedOut without a usable login, other exceptions for anything else, such as
+    a login that couldn't be renewed just now (offline, say)."""
+    token, has_login = _cli_login_token()
+    renewed = not token and has_login and _renew_cli_login()  # nothing to renew without a login
+    if renewed:
+        token, has_login = _cli_login_token()
         log("plan usage: token renewed" if token else "plan usage: renewal didn't produce a fresh token")
     if not token:
-        log("plan usage: no usable token - run `claude auth login` in a terminal")
-        return None
+        if not claude_cli():
+            raise SignedOut("Install Claude Code's terminal CLI, then sign in")
+        if has_login and not renewed and _renew_failed:
+            raise RuntimeError("Couldn't renew your Claude login (offline?) - will retry")
+        raise SignedOut("Sign in to Claude in Terminal")
     try:
         return request_plan_usage(token)
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
-            log(f"plan usage: token rejected (HTTP {e.code}) - run `claude auth login` in a terminal")
-            return None
+            raise SignedOut(f"Sign in to Claude in Terminal again (login rejected, HTTP {e.code})")
         raise
+
+
+def usage_error(e):
+    """A short reason a plan usage fetch failed, for the menu bar app."""
+    if isinstance(e, urllib.error.HTTPError):
+        return f"Anthropic's usage service answered HTTP {e.code}"
+    if isinstance(e, urllib.error.URLError):
+        return f"Couldn't reach Anthropic ({e.reason})"
+    if isinstance(e, socket.timeout):
+        return "Anthropic didn't answer in time"
+    return ascii_text(e, 100) or type(e).__name__
+
+
+def claude_signed_in():
+    """Whether the terminal `claude` CLI is signed in (`claude auth status`); False if it's
+    missing or doesn't answer."""
+    cli = claude_cli()
+    if not cli:
+        return False
+    try:
+        res = subprocess.run([cli, "auth", "status"], env=cli_env(cli), capture_output=True, text=True, timeout=15)
+        return json.loads(res.stdout).get("loggedIn") is True
+    except (OSError, subprocess.TimeoutExpired, ValueError, AttributeError):
+        return False
+
+
+class UsageWatcher:
+    """Plan limits, fetched in the background so a Keychain prompt, a `claude -p` renewal or a
+    slow network never holds up the display: every `interval` seconds while they come through,
+    every minute while connecting, signed out or failing, and straight away on refresh(). A
+    Keychain prompt that was denied or went unanswered also waits `interval`, so it doesn't nag.
+
+    state is "off" (plan_usage is off), "pending" (connecting), "ok", "signed_out" (no usable
+    `claude` login) or "error" (anything else); message says what to do about the last two.
+    The numbers from the last fetch that worked stay on the display until it's turned off."""
+
+    RETRY = 60
+
+    def __init__(self, interval, enabled, background=True):
+        self.interval = interval
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.enabled = enabled
+        self.gen = 0  # bumped on every on/off, so a fetch from before it is thrown away
+        self.fetching = False
+        self.state, self.message, self.data = ("pending" if enabled else "off"), "", None
+        self.slow = False  # the last fetch was held up at the Keychain: retry at interval, not RETRY
+        self.last = None  # the last fetch's (state, message), to log only changes
+        if background:
+            threading.Thread(target=self._run, daemon=True).start()
+
+    def set_enabled(self, on):
+        with self.lock:
+            if on == self.enabled:
+                return
+            self.enabled, self.gen, self.last, self.slow = on, self.gen + 1, None, False
+            self.state, self.message, self.data = ("pending" if on else "off"), "", None
+        self.wake.set()
+
+    def refresh(self):
+        """Fetch now. If a fetch is already running, its answer serves this too."""
+        with self.lock:
+            if not self.enabled:
+                return
+            if self.state != "ok":
+                self.state, self.message = "pending", ""
+            if self.fetching:
+                return
+        self.wake.set()
+
+    def _run(self):
+        while True:
+            self.wake.clear()
+            with self.lock:
+                self.fetching = True
+            self.fetch_now()
+            with self.lock:
+                self.fetching = False
+                delay = None if not self.enabled else self.interval if self.state == "ok" or self.slow else self.RETRY
+            self.wake.wait(delay)
+
+    def fetch_now(self):
+        with self.lock:
+            if not self.enabled:
+                return
+            gen = self.gen
+        data, slow = None, False
+        try:
+            data, state, message = fetch_plan_usage(), "ok", ""
+        except SignedOut as e:
+            state, message = "signed_out", str(e)
+        except KeychainBlocked as e:
+            # Every retry puts macOS's prompt up again: wait the usual interval unless asked (Try again)
+            state, message, slow = "error", str(e), True
+        except Exception as e:  # network / format errors must not kill the bridge
+            state, message = "error", usage_error(e)
+        with self.lock:
+            if gen != self.gen:
+                return  # turned off (or off and on again) meanwhile
+            if (state, message) != self.last:
+                log("plan usage: connected" if state == "ok" else f"plan usage: {state.replace('_', ' ')} - {message}")
+                self.last = (state, message)
+            self.state, self.message, self.slow = state, message, slow
+            if data:
+                self.data = data
+
+    def payload(self):
+        """The usage object for the display, or None."""
+        with self.lock:
+            return dict(self.data) if self.enabled and self.data else None
+
+    def status(self):
+        """GET /settings' usage object. Percentages are None where unknown."""
+        with self.lock:
+            d = self.data or {}
+            state, message = self.state, self.message
+
+        def pct(key):
+            v = d.get(key)
+            return float(v) if isinstance(v, (int, float)) and v >= 0 else None
+
+        return {"state": state, "message": message, "h5": pct("h5"), "d7": pct("d7"),
+                "h5_reset": int(d.get("h5_reset") or 0), "d7_reset": int(d.get("d7_reset") or 0),
+                "at": int(d.get("at") or 0)}
 
 
 # ---------------------------------------------------------------------------
@@ -1016,10 +1220,34 @@ def latest_release():
             "assets": {a["name"]: a["browser_download_url"] for a in data.get("assets", [])}}
 
 
+_save_lock = threading.Lock()
+
+
 def save_config(**changes):
-    cfg = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
-    cfg.update(changes)
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    """Writes changes into config.json, keeping every other key in it. The new file is written
+    beside it with the same permissions and renamed over it, so it's never left half written."""
+    with _save_lock:
+        path = CONFIG_PATH.resolve()
+        cfg = json.loads(path.read_text()) if path.exists() else {}
+        cfg.update(changes)
+        try:
+            mode = stat.S_IMODE(path.stat().st_mode)
+        except OSError:
+            mode = 0o600  # a new file: it holds the display's pairing key
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".config.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(json.dumps(cfg, indent=2) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.chmod(tmp, mode)
+            os.replace(tmp, str(path))
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
 
 def device_key(cfg):
@@ -1034,7 +1262,8 @@ class Device:
     def __init__(self, host):
         self.host = host
         self.ip = None
-        self.ok = None
+        self.ok = None  # whether the last push got through; None before the first
+        self.last_push = 0  # when a push last got through
 
     def _resolve(self):
         try:
@@ -1052,6 +1281,7 @@ class Device:
         try:
             with urllib.request.urlopen(req, timeout=3) as r:
                 r.read()
+            self.last_push = time.time()
             self._set_ok(True, f"pushing to {self.host} ({self.ip})")
             return True
         except OSError as e:
@@ -1094,40 +1324,171 @@ class Device:
 
 
 # ---------------------------------------------------------------------------
-# HTTP server for hooks
+# Settings the menu bar app can change (GET/POST /settings)
 # ---------------------------------------------------------------------------
 
-def make_handler(hooks, latest, chats):
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self):
-            if self.path not in ("/hook", "/chat"):
-                self.send_error(404)
-                return
-            length = int(self.headers.get("Content-Length") or 0)
-            try:
-                body = json.loads(self.rfile.read(length) or b"{}")
-            except json.JSONDecodeError:
-                body = {}
-            if self.path == "/hook":
-                hooks.handle(body)
-            elif chats:
-                chats.add_question(body.get("question"), body.get("chat_title"))
-            self.send_response(200)
-            self.send_header("Content-Length", "0")
-            self.end_headers()
+BOOL_SETTINGS = ("plan_usage", "cat", "ci_checks", "status_page", "chat_alerts", "check_replies",
+                 "night_mode", "night_alerts")
+SETTINGS = BOOL_SETTINGS + ("night_start", "night_end", "night_screen")
+CLOCK_TIME = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")  # 24-hour HH:MM
 
-        def do_GET(self):
-            if self.path != "/state":
-                self.send_error(404)
-                return
-            state = json.loads(latest.get("payload") or b"{}")
-            state["hook_events_seen"] = hooks.events_seen
-            body = json.dumps(state, indent=2).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
+
+class SettingError(ValueError):
+    """A settings change that can't be applied; the message is shown in the menu bar app."""
+
+
+def check_setting(key, value):
+    if key not in SETTINGS:
+        raise SettingError(f"Unknown setting: {key}")
+    if key in BOOL_SETTINGS:
+        if not isinstance(value, bool):
+            raise SettingError(f"{key} must be true or false")
+    elif key in ("night_start", "night_end"):
+        if not isinstance(value, str) or not CLOCK_TIME.fullmatch(value):
+            raise SettingError(f"{key} must be a 24-hour time such as 22:00")
+    elif value not in ("off", "dim"):
+        raise SettingError('night_screen must be "off" or "dim"')
+
+
+def validate_settings(changes, current):
+    """Raises SettingError unless every change is valid, so a request is applied whole or not at all."""
+    if not isinstance(changes, dict):
+        raise SettingError("Expected a JSON object of settings")
+    for key, value in changes.items():
+        check_setting(key, value)
+    merged = {**current, **changes}
+    if ("night_start" in changes or "night_end" in changes) and merged["night_start"] == merged["night_end"]:
+        raise SettingError("Night mode needs different start and end times")
+
+
+def user_settings(cfg):
+    """The settings the menu bar app can change, from a config. A hand-edited value that isn't
+    valid reads as its default, so the app and the display always get clean values."""
+    out = {}
+    for key in SETTINGS:
+        value = cfg.get(key, DEFAULT_CONFIG[key])
+        try:
+            check_setting(key, value)  # so "false" or 0 for a true/false setting reads as its default
+        except SettingError:
+            value = DEFAULT_CONFIG[key]
+        out[key] = value
+    return out
+
+
+def clock_minutes(hhmm):
+    """Minutes since midnight for a valid "HH:MM"."""
+    return int(hhmm[:2]) * 60 + int(hhmm[3:])
+
+
+def night_window(s):
+    """The "night" object for the display, or None while night mode is off."""
+    if not s["night_mode"]:
+        return None
+    return {"start": clock_minutes(s["night_start"]), "end": clock_minutes(s["night_end"]),
+            "dim": s["night_screen"] == "dim", "alerts": s["night_alerts"]}
+
+
+def night_active(s, now=None):
+    """Whether it's night by this Mac's clock: night mode is on and the time is in [start, end),
+    which wraps past midnight when start is later than end. The display works this out for
+    itself; this is for the menu bar app."""
+    night = night_window(s)
+    if not night or night["start"] == night["end"]:
+        return False
+    now = now or datetime.now()
+    m, start, end = now.hour * 60 + now.minute, night["start"], night["end"]
+    return start <= m < end if start < end else (m >= start or m < end)
+
+
+# ---------------------------------------------------------------------------
+# HTTP server: hooks, the chat connector and the menu bar app
+# ---------------------------------------------------------------------------
+
+class HelperServer(ThreadingHTTPServer):
+    # Hooks come in bursts (parallel tool calls in several sessions); the default backlog of 5
+    # would turn some away while the helper is busy
+    request_queue_size = 128
+
+
+def make_handler(bridge):
+    class Handler(BaseHTTPRequestHandler):
+        def _allowed(self):
+            """Only local tools use the helper: hooks (curl), the chat connector and the menu bar
+            app. A web page's requests carry an Origin header, and a page that points its own
+            hostname at 127.0.0.1 (DNS rebinding) can't make Host say 127.0.0.1 or localhost."""
+            port = self.server.server_address[1]
+            if self.request_version == "HTTP/0.9":  # no headers at all
+                return False
+            hosts = self.headers.get_all("Host") or []
+            return ("Origin" not in self.headers and len(hosts) == 1
+                    and hosts[0] in (f"127.0.0.1:{port}", f"localhost:{port}"))
+
+        def _read_body(self):
+            try:
+                length = max(0, int(self.headers.get("Content-Length") or 0))
+            except ValueError:
+                length = 0
+            return self.rfile.read(length) if length else b""
+
+        def _reply(self, code, obj=None):
+            body = json.dumps(obj, indent=2).encode() if obj is not None else b""
+            self.send_response(code)
+            if obj is not None:
+                self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
+
+        def do_POST(self):
+            raw = self._read_body()  # read even a request that's refused, so the reply gets through
+            if not self._allowed():
+                return self._reply(403, {"error": "Forbidden"})
+            if self.path in ("/hook", "/chat"):
+                try:
+                    body = json.loads(raw or b"{}")
+                except ValueError:
+                    body = {}
+                chats = bridge.chats
+                if isinstance(body, dict):
+                    if self.path == "/hook":
+                        bridge.hooks.handle(body)
+                    elif chats:
+                        chats.add_question(body.get("question"), body.get("chat_title"))
+                return self._reply(200)
+            if self.path not in ("/settings", "/usage/connect", "/usage/refresh"):
+                return self._reply(404, {"error": "Not found"})
+            # Requiring JSON makes a browser ask first (a CORS preflight), which goes unanswered
+            if self.headers.get_content_type() != "application/json":
+                return self._reply(415, {"error": "Content-Type must be application/json"})
+            extra = {}
+            try:
+                if self.path == "/settings":
+                    try:
+                        changes = json.loads(raw or b"{}")
+                    except ValueError:
+                        raise SettingError("The request isn't valid JSON") from None
+                    bridge.change_settings(changes)
+                elif self.path == "/usage/connect":
+                    extra["signed_in"] = bridge.connect_usage()
+                else:
+                    bridge.usage.refresh()
+            except SettingError as e:
+                return self._reply(400, {"error": str(e)})
+            except (OSError, ValueError) as e:
+                log("couldn't save config.json:", e)
+                return self._reply(500, {"error": f"Couldn't save the settings: {e}"})
+            self._reply(200, {**bridge.settings_body(), **extra})
+
+        def do_GET(self):
+            if not self._allowed():
+                return self._reply(403, {"error": "Forbidden"})
+            if self.path == "/settings":
+                return self._reply(200, bridge.settings_body())
+            if self.path == "/state":
+                state = json.loads(bridge.payload or b"{}")
+                state["hook_events_seen"] = bridge.hooks.events_seen
+                return self._reply(200, state)
+            self._reply(404, {"error": "Not found"})
 
         def log_message(self, *args):
             pass
@@ -1146,128 +1507,248 @@ def load_config(args):
     return cfg
 
 
+# ---------------------------------------------------------------------------
+# Main loop
+# ---------------------------------------------------------------------------
+
+class Bridge:
+    """The helper's running state, shared by the push loop and the HTTP server. Settings can
+    change at any time (POST /settings), so the loop reads them afresh on every pass and the
+    optional watchers follow them: started the first time their option is on, ignored while
+    it's off."""
+
+    def __init__(self, cfg, once=False):
+        s = user_settings(cfg)
+        self.cfg = cfg
+        self.lock = threading.Lock()  # guards cfg, which the HTTP server changes
+        self.once = once
+        self.hooks = HookState(classify=s["check_replies"])
+        self.today = TodayStats()
+        self.focus = FocusWatcher()
+        self.usage = UsageWatcher(cfg["plan_usage_interval"], s["plan_usage"], background=not once)
+        self.chats = self.ci = self.incidents = None
+        self.device = Device(cfg["device_host"])
+        self.tz = posix_timezone()
+        self.key = device_key(cfg)
+        self.release = {"tag": None, "next": 0}
+        self.display = {"version": None, "paired": None, "night": None, "next": 0}  # night: has night mode
+        self.state = {}  # the latest state for the display
+        self.payload = None  # ...as sent, with its timestamp
+
+    def settings(self):
+        with self.lock:
+            return user_settings(self.cfg)
+
+    def follow_settings(self, s):
+        """Brings the optional watchers in line with the settings, which may have just changed."""
+        self.hooks.classify = s["check_replies"]
+        if not s["chat_alerts"]:
+            self.chats = None
+        elif not self.chats:
+            self.chats = ChatWatcher()  # starts at the end of the app's log, so no stale alerts
+        if self.once:
+            return
+        if s["ci_checks"] and GH_CLI:
+            if not self.ci:
+                self.ci = CIWatcher(self.cfg["ci_passed_window"])
+        elif self.ci:
+            self.ci.watch(None)  # nothing to fetch while it's off
+        if s["status_page"] and not self.incidents:
+            self.incidents = IncidentWatcher()
+        elif self.incidents:
+            self.incidents.set_enabled(s["status_page"])
+
+    def change_settings(self, changes):
+        """POST /settings: checks every change, saves them to config.json and applies them; the
+        push loop sends the result to the display within a second. Raises SettingError, with
+        nothing applied, or OSError if config.json can't be written."""
+        with self.lock:
+            validate_settings(changes, user_settings(self.cfg))
+            if not changes:
+                return
+            save_config(**changes)
+            self.cfg.update(changes)
+            self.usage.set_enabled(user_settings(self.cfg)["plan_usage"])
+        log("settings changed:", ", ".join(f"{k} {json.dumps(v)}" for k, v in sorted(changes.items())))
+
+    def connect_usage(self):
+        """POST /usage/connect: turns plan usage on and fetches it now. Returns whether the
+        terminal `claude` CLI is signed in; if not, the menu bar app opens Terminal to sign in."""
+        # Asked first, so the fetch doesn't run the CLI at the same time (to renew a login)
+        signed_in = claude_signed_in()
+        log(f"plan usage: connect - terminal claude is {'signed in' if signed_in else 'not signed in'}")
+        with self.lock:
+            save_config(plan_usage=True)
+            self.cfg["plan_usage"] = True
+            self.usage.set_enabled(True)
+        self.usage.refresh()
+        return signed_in
+
+    def update_available(self):
+        """The latest release when the helper or the display is behind it, else None."""
+        tag, current = self.release["tag"], self.display["version"]
+        if tag and (is_newer(tag, helper_version()) or is_newer(tag, current) or current == "old"):
+            return tag
+        return None
+
+    def settings_body(self):
+        """GET /settings: the settings, and what the menu bar app shows about the helper."""
+        s = self.settings()
+        state = self.state
+        return {"settings": s, "status": {
+            "helper_version": helper_version(),
+            "helper_dir": str(HELPER_DIR),
+            "log_path": str(LOG_PATH),
+            "claude_cli": claude_cli(),
+            "display": {"host": self.device.host, "reachable": self.device.ok,
+                        "version": self.display["version"], "last_push": int(self.device.last_push),
+                        "night_mode": self.display["night"]},
+            "update": self.update_available(),
+            "usage": self.usage.status(),
+            "night_active": night_active(s),
+            "counts": state.get("counts") or dict.fromkeys(("waiting", "busy", "error", "done", "idle"), 0),
+            # The push loop rebuilds state within a second; don't answer a switch-off with the old incident
+            "incident": state.get("incident") if s["status_page"] else None,
+        }}
+
+    def check_display(self, now):
+        """Every 10 minutes: the display's firmware version, pairing it if it isn't yet, and
+        whether it has night mode."""
+        display = self.display
+        if now < display["next"]:
+            return
+        display["next"] = now + 600
+        try:
+            info = self.device.info()
+            display.update(version=info.get("version"), paired=info.get("paired"), night="night" in info)
+            if not info.get("paired"):
+                self.device.pair(self.key)
+                display["paired"] = True
+                log(f"paired with the display (firmware {display['version']})")
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                display.update(version="old", paired=False, night=False)  # firmware from before Wi-Fi updates
+        except (OSError, ValueError):
+            display["next"] = now + 60
+
+    def check_release(self, now):
+        if now < self.release["next"]:
+            return
+        self.release["next"] = now + self.cfg["update_check_interval"]
+        try:
+            self.release["tag"] = latest_release()["tag"]
+        except (OSError, ValueError, KeyError) as e:
+            self.release["next"] = now + 3600
+            log("update check failed:", e)
+
+    def build_state(self, s):
+        chats = self.chats
+        if chats:
+            chats.update()
+        # A finished session you're looking at in the Claude app doesn't need a Done card
+        focused = self.focus.update()
+        live = read_live_sessions()
+        if focused and (chats.was_front if chats else claude_app_in_front()):
+            for sid, d in live.items():
+                if d.get("hostSessionId") == focused:
+                    self.hooks.mark_done_seen(sid)
+        hook_snap, _ = self.hooks.snapshot()
+        rows, counts = build_sessions(hook_snap, self.cfg["done_window"], chats.rows() if chats else ())
+        state = {
+            "sessions": rows[:MAX_SESSIONS_SENT],
+            "counts": counts,
+            "today": self.today.snapshot(),
+            "usage": self.usage.payload(),
+            "tz": self.tz,
+            "cat": s["cat"],
+        }
+        # Night mode: the display keeps the hours itself, so they still apply while this Mac sleeps
+        night = night_window(s)
+        if night:
+            state["night"] = night
+        # CI checks for the session open in the Claude app, even after you switch to another app
+        if s["ci_checks"] and GH_CLI:
+            sid = next((x for x, d in live.items() if focused and d.get("hostSessionId") == focused), None)
+            cwd = live[sid].get("cwd") if sid else None
+            if self.ci:
+                self.ci.watch(cwd)
+            checks = self.ci.snapshot() if self.ci else pr_checks(cwd) if cwd else None
+            if checks:
+                state["ci"] = {"id": sid[:8], **checks}
+        # An Anthropic incident affecting Claude Code: the display's ring turns red
+        incident = None
+        if s["status_page"]:
+            incident = self.incidents.snapshot() if self.incidents else None
+            if self.once:
+                try:
+                    incident = current_incident()
+                except (OSError, ValueError) as e:
+                    log("status page check failed:", e)
+        if incident:
+            state["incident"] = incident
+        # Offer an update when the helper or the display is behind the latest release
+        update = self.update_available()
+        if update:
+            state["update"] = update
+        return state
+
+    def serve(self):
+        port = self.cfg["listen_port"]
+        server = HelperServer(("127.0.0.1", port), make_handler(self))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        log(f"listening on 127.0.0.1:{port}, device {self.device.host}, "
+            f"plan usage {'on' if self.usage.enabled else 'off'}")
+
+    def run(self):
+        """Builds the state every push_interval seconds and sends it to the display when it
+        changes, or every heartbeat_interval seconds regardless. With once, prints it instead."""
+        cfg = self.cfg
+        last_sent, last_push, last_today = None, 0, 0
+        while True:
+            now = time.time()
+            s = self.settings()
+            self.follow_settings(s)
+            if now - last_today >= 30 or self.once:
+                self.today.update()
+                last_today = now
+            if self.once:
+                self.usage.fetch_now()
+            else:
+                self.check_display(now)
+                self.check_release(now)
+            state = self.build_state(s)
+            if self.once:
+                print(json.dumps(state, indent=2))
+                return
+
+            body = json.dumps(state, separators=(",", ":"))
+            payload = json.dumps({**state, "t": int(now)}, separators=(",", ":")).encode()
+            self.state, self.payload = state, payload
+            due = body != last_sent or now - last_push >= cfg["heartbeat_interval"]
+            if self.device.ok is False and now - last_push < 5:
+                due = False  # device unreachable: retry every few seconds, not every loop
+            if due:
+                last_push = now
+                was_ok = self.device.ok
+                if self.device.push(payload):
+                    last_sent = body
+                    if was_ok is False:
+                        self.display["next"] = 0  # back after a restart (an update?): read /info again
+            time.sleep(cfg["push_interval"])
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--device", help="device hostname or IP (default claude-status.local)")
     ap.add_argument("--plan-usage", action="store_true", help="enable plan limit fetching (reads Keychain)")
     ap.add_argument("--once", action="store_true", help="print one state snapshot and exit")
     args = ap.parse_args()
-    cfg = load_config(args)
 
-    hooks = HookState(classify=cfg["check_replies"])
-    today = TodayStats()
-    chats = ChatWatcher() if cfg["chat_alerts"] else None
-    focus = FocusWatcher()
-    ci_checks = cfg["ci_checks"] and GH_CLI
-    ci = CIWatcher(cfg["ci_passed_window"]) if ci_checks and not args.once else None
-    incidents = IncidentWatcher() if cfg["status_page"] and not args.once else None
-    device = Device(cfg["device_host"])
-    latest = {}
-    usage = {"data": None, "next": 0}
-
-    tz = posix_timezone()
-    key = device_key(cfg)
-    release = {"tag": None, "next": 0}
-    display = {"version": None, "paired": None, "next": 0}
-    hooks.seed_from_transcripts(read_live_sessions())
+    bridge = Bridge(load_config(args), once=args.once)
+    bridge.hooks.seed_from_transcripts(read_live_sessions())
     if not args.once:
-        server = ThreadingHTTPServer(("127.0.0.1", cfg["listen_port"]), make_handler(hooks, latest, chats))
-        threading.Thread(target=server.serve_forever, daemon=True).start()
-        log(f"listening for hooks on 127.0.0.1:{cfg['listen_port']}, device {cfg['device_host']}, "
-            f"plan usage {'on' if cfg['plan_usage'] else 'off'}")
-
-    last_sent, last_push, last_today = None, 0, 0
-    while True:
-        now = time.time()
-        if now - last_today >= 30 or args.once:
-            today.update()
-            last_today = now
-        if cfg["plan_usage"] and now >= usage["next"]:
-            try:
-                usage["data"] = fetch_plan_usage() or usage["data"]
-            except Exception as e:  # network / format errors must not kill the bridge
-                log("plan usage fetch failed:", e)
-            usage["next"] = now + cfg["plan_usage_interval"]
-
-        if not args.once and now >= display["next"]:
-            display["next"] = now + 600
-            try:
-                info = device.info()
-                display.update(version=info.get("version"), paired=info.get("paired"))
-                if not info.get("paired"):
-                    device.pair(key)
-                    display["paired"] = True
-                    log(f"paired with the display (firmware {display['version']})")
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    display.update(version="old", paired=False)  # firmware from before Wi-Fi updates
-            except (OSError, ValueError):
-                display["next"] = now + 60
-        if not args.once and now >= release["next"]:
-            release["next"] = now + cfg["update_check_interval"]
-            try:
-                release["tag"] = latest_release()["tag"]
-            except (OSError, ValueError, KeyError) as e:
-                release["next"] = now + 3600
-                log("update check failed:", e)
-
-        if chats:
-            chats.update()
-        # A finished session you're looking at in the Claude app doesn't need a Done card
-        focused = focus.update()
-        live = read_live_sessions()
-        if focused and (chats.was_front if chats else claude_app_in_front()):
-            for sid, d in live.items():
-                if d.get("hostSessionId") == focused:
-                    hooks.mark_done_seen(sid)
-        hook_snap, _ = hooks.snapshot()
-        rows, counts = build_sessions(hook_snap, cfg["done_window"], chats.rows() if chats else ())
-        state = {
-            "sessions": rows[:MAX_SESSIONS_SENT],
-            "counts": counts,
-            "today": today.snapshot(),
-            "usage": usage["data"],
-            "tz": tz,
-            "cat": bool(cfg["cat"]),
-        }
-        # CI checks for the session open in the Claude app, even after you switch to another app
-        if ci_checks:
-            sid = next((s for s, d in live.items() if focused and d.get("hostSessionId") == focused), None)
-            cwd = live[sid].get("cwd") if sid else None
-            if ci:
-                ci.watch(cwd)
-            checks = ci.snapshot() if ci else pr_checks(cwd) if cwd else None
-            if checks:
-                state["ci"] = {"id": sid[:8], **checks}
-        # An Anthropic incident affecting Claude Code: the display's ring turns red
-        incident = incidents.snapshot() if incidents else None
-        if args.once and cfg["status_page"]:
-            try:
-                incident = current_incident()
-            except (OSError, ValueError) as e:
-                log("status page check failed:", e)
-        if incident:
-            state["incident"] = incident
-        # Offer an update when the helper or the display is behind the latest release
-        tag = release["tag"]
-        if tag and (is_newer(tag, helper_version()) or is_newer(tag, display["version"])
-                    or display["version"] == "old"):
-            state["update"] = tag
-        if args.once:
-            print(json.dumps(state, indent=2))
-            return
-
-        body = json.dumps(state, separators=(",", ":"))
-        payload = json.dumps({**state, "t": int(now)}, separators=(",", ":")).encode()
-        latest["payload"] = payload
-        due = body != last_sent or now - last_push >= cfg["heartbeat_interval"]
-        if device.ok is False and now - last_push < 5:
-            due = False  # device unreachable: retry every few seconds, not every loop
-        if due:
-            last_push = now
-            if device.push(payload):
-                last_sent = body
-        time.sleep(cfg["push_interval"])
+        bridge.serve()
+    bridge.run()
 
 
 if __name__ == "__main__":
