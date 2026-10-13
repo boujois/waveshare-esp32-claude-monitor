@@ -11,6 +11,10 @@
 // Without the button: power the display on 3 times in a row (each within 10 s of the last), or
 // POST http://claude-status.local/wifi/reset.
 //
+// Night mode, set from the Mac, turns the screen off (or very dim) between two times of day.
+// Needs-input alerts can still light it, and a double tap or BOOT press on the dark screen lights
+// it for a 15-second peek without dismissing anything (see night.cpp).
+//
 // Wi-Fi setup: with no saved network, the display opens its own "Claude-Monitor-Setup"
 // network. Join it from a phone (scan the QR code on screen) and pick your Wi-Fi.
 // The timezone comes from the Mac helper, so there's nothing to configure in code.
@@ -30,12 +34,14 @@
 #include <WiFiManager.h>
 #include <esp_system.h>
 #include <esp_timer.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include <utility>
 #include <vector>
 
 #include "cat.h"
+#include "night.h"
 #include "taps.h"
 
 #if __has_include("secrets.h") && !defined(RELEASE_BUILD)  // never in release images
@@ -120,7 +126,6 @@ static LGFX_Sprite frame(&lcd);
 
 constexpr const char *BOARD_NAME = "waveshare-s3-lcd128";
 static void showFrame() { frame.pushSprite(0, 0); }
-static uint32_t touchCount() { return 0; }  // no touch screen: wake from night hours with a double tap
 
 #else  // BOARD_LILYGO_T_RGB
 
@@ -275,7 +280,7 @@ static void showFrame() { lcd.present(frame); }
 // the run is over), and the fifth touch of a run counts as five taps straight away.
 namespace touchtaps {
 constexpr uint32_t POLL_MS = 10, GAP_MIN = 60, GAP_MAX = 450;
-volatile uint32_t doubles = 0, fives = 0, touches = 0;
+volatile uint32_t doubles = 0, fives = 0;
 
 void watch(void *) {
   bool wasDown = false;
@@ -286,7 +291,6 @@ void watch(void *) {
     if (down && !wasDown && (run == 0 || now - lastTap >= GAP_MIN)) {
       run = (run && now - lastTap <= GAP_MAX) ? run + 1 : 1;
       lastTap = now;
-      touches = touches + 1;
       if (run == 5) fives = fives + 1;
     }
     wasDown = down;
@@ -304,7 +308,6 @@ bool tapsBegin(float) {
 }
 uint32_t doubleTapCount() { return touchtaps::doubles; }
 uint32_t fiveTapCount() { return touchtaps::fives; }
-static uint32_t touchCount() { return touchtaps::touches; }  // every touch, for waking from night hours
 
 // Firmware for other boards would boot but drive the wrong screen, so Wi-Fi updates only
 // accept images that carry this tag (every T-RGB build does, via this very string).
@@ -377,44 +380,34 @@ constexpr uint8_t DEFAULT_BRIGHTNESS = 150;
 #endif
 static int idleBrightness = DEFAULT_BRIGHTNESS;  // normal screens; alerts are always full brightness
 
-// Night hours: the backlight is off between these times (minutes after midnight, local time)
-// unless Claude needs you. A tap wakes the screen for WAKE_MS. Equal times turn it off.
-constexpr int DEFAULT_NIGHT_FROM = 23 * 60, DEFAULT_NIGHT_TO = 7 * 60;
-constexpr uint32_t WAKE_MS = 60000;
-static int nightFrom = DEFAULT_NIGHT_FROM, nightTo = DEFAULT_NIGHT_TO;
-
-static bool nightNow() {
-  if (nightFrom == nightTo) return false;
-  time_t now = time(nullptr);
-  if (now < 1700000000) return false;  // no clock yet
-  struct tm t;
-  localtime_r(&now, &t);
-  int m = t.tm_hour * 60 + t.tm_min;
-  return nightFrom < nightTo ? (m >= nightFrom && m < nightTo) : (m >= nightFrom || m < nightTo);
-}
-
-static String hhmm(int m) {
-  char b[6];
-  snprintf(b, sizeof(b), "%02d:%02d", m / 60, m % 60);
-  return b;
-}
-
-static int parseHHMM(const String &v) {  // "23:00" or "23" -> minutes, or -1
-  int colon = v.indexOf(':');
-  int h = (colon < 0 ? v : v.substring(0, colon)).toInt();
-  int m = colon < 0 ? 0 : v.substring(colon + 1).toInt();
-  if (v.length() == 0 || h < 0 || h > 23 || m < 0 || m > 59) return -1;
-  return h * 60 + m;
-}
 static String currentTz;
 static uint8_t powerCycles = 0;  // consecutive quick power-ons, for the no-button Wi-Fi reset
 static String pairKey;           // shared with the Mac helper; required for firmware updates
 static bool showCat = true;      // the cat and its power-on walk ("cat" in the helper's config.json)
+static NightMode nightMode;      // from the helper's config.json, remembered across reboots
+static int brightness = -1;      // the backlight now
+
+static void setBacklight(int level) {
+  if (level != brightness) lcd.setBrightness(brightness = level);
+}
 
 static void applyTimezone(const String &tz) {
   currentTz = tz;
   setenv("TZ", tz.c_str(), 1);
   tzset();
+}
+
+static String hhmm(int minute) {
+  char b[8];
+  snprintf(b, sizeof(b), "%02d:%02d", minute / 60, minute % 60);
+  return b;
+}
+
+// "22:00-07:00, screen off, alerts on", for GET / and the serial log
+static String describeNight(const NightMode &n) {
+  if (!n.enabled) return "off";
+  return hhmm(n.start) + "-" + hhmm(n.end) + ", screen " + (n.dim ? "dim" : "off") + ", alerts " +
+         (n.alerts ? "on" : "off");
 }
 
 static void handleState() {
@@ -471,6 +464,15 @@ static void handleState() {
   if (!doc["incident"].isNull()) s.incident = (const char *)(doc["incident"]["name"] | "Claude incident");
   st = std::move(s);
 
+  // The Mac sends its clock too, which sets ours where the network blocks time servers (night mode
+  // and the time on screen need it). The time servers still correct it if they're ever reached.
+  long macTime = doc["t"] | 0L;
+  if (time(nullptr) <= 1600000000 && macTime > 1600000000) {
+    struct timeval tv = {(time_t)macTime, 0};
+    settimeofday(&tv, nullptr);
+    Serial.println("Clock set from the Mac");
+  }
+
   // The Mac helper sends its timezone as a POSIX TZ string; remember it across reboots
   String tz = (const char *)(doc["tz"] | "");
   if (tz.length() && tz != currentTz) {
@@ -485,6 +487,26 @@ static void handleState() {
     showCat = cat;
     prefs.putBool("cat", cat);
   }
+
+  // Night mode too, so it keeps working while the Mac is asleep. Pushes come every second, so
+  // only what changed is written to flash.
+  NightMode n = nightMode;
+  n.enabled = doc["night"].is<JsonObject>();
+  if (n.enabled) {
+    JsonObject o = doc["night"];
+    int start = o["start"] | -1, end = o["end"] | -1;
+    if (start >= 0 && start < 1440) n.start = start;
+    if (end >= 0 && end < 1440) n.end = end;
+    n.dim = o["dim"] | n.dim;
+    n.alerts = o["alerts"] | n.alerts;
+  }
+  if (n.enabled != nightMode.enabled) prefs.putBool("night", n.enabled);
+  if (n.start != nightMode.start) prefs.putUShort("nstart", n.start);
+  if (n.end != nightMode.end) prefs.putUShort("nend", n.end);
+  if (n.dim != nightMode.dim) prefs.putBool("ndim", n.dim);
+  if (n.alerts != nightMode.alerts) prefs.putBool("nalert", n.alerts);
+  if (describeNight(n) != describeNight(nightMode)) Serial.println("Night mode " + describeNight(n));
+  nightMode = n;
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
@@ -518,30 +540,6 @@ static void handleBrightness() {
   server.send(200, "text/plain", "brightness " + String((idleBrightness * 100 + 127) / 255) + "%\n");
 }
 
-// GET shows the night hours; POST /sleep?from=23:00&to=07:00 changes and saves them, POST /sleep?off=1
-// turns them off.
-static void handleSleep() {
-  if (server.method() == HTTP_POST) {
-    if (server.hasArg("off")) {
-      nightFrom = nightTo = 0;
-    } else {
-      int from = server.hasArg("from") ? parseHHMM(server.arg("from")) : nightFrom;
-      int to = server.hasArg("to") ? parseHHMM(server.arg("to")) : nightTo;
-      if (from < 0 || to < 0) {
-        server.send(400, "text/plain", "Use times like from=23:00&to=07:00\n");
-        return;
-      }
-      nightFrom = from;
-      nightTo = to;
-    }
-    prefs.putUShort("nightFrom", nightFrom);
-    prefs.putUShort("nightTo", nightTo);
-  }
-  server.send(200, "text/plain",
-              nightFrom == nightTo ? String("night hours off\n")
-                                   : "night hours " + hhmm(nightFrom) + "-" + hhmm(nightTo) + (nightNow() ? " (now)\n" : "\n"));
-}
-
 static void handleWifiReset() {
   server.send(200, "text/plain", "Forgetting Wi-Fi and restarting into Wi-Fi setup\n");
   delay(300);
@@ -553,7 +551,10 @@ static void handleRoot() {
   String out = "claude-status display " FW_VERSION "\nIP " + WiFi.localIP().toString() + "\nlast push " +
                (st.valid ? String((millis() - st.rxMillis) / 1000) + "s ago" : String("never")) + "\n" +
                (tapReady ? "taps seen: " + String(doubleTapCount()) + " double, " + String(fiveTapCount()) + " five"
-                         : String("no motion sensor: taps on the case don't work")) + "\n";
+                         : String("no motion sensor: taps on the case don't work")) + "\n" +
+               "night mode " + describeNight(nightMode) +
+               (nightMode.enabled ? (nightActive(nightMode, time(nullptr)) ? " (on now)" : " (not now)") : "") +
+               ", backlight " + String(brightness) + "\n";
   server.send(200, "text/plain", out);
 }
 
@@ -1065,6 +1066,14 @@ static void handleInfo() {
   d["board"] = BOARD_NAME;
   d["paired"] = pairKey.length() > 0;
   d["ip"] = WiFi.localIP().toString();
+  JsonObject n = d["night"].to<JsonObject>();
+  n["enabled"] = nightMode.enabled;
+  n["start"] = nightMode.start;
+  n["end"] = nightMode.end;
+  n["dim"] = nightMode.dim;
+  n["alerts"] = nightMode.alerts;
+  n["active"] = nightActive(nightMode, time(nullptr));
+  d["brightness"] = brightness;
   String out;
   serializeJson(d, out);
   server.send(200, "application/json", out);
@@ -1130,6 +1139,7 @@ static void handleUpdateUpload() {
     if (!otaAuthed) return;
     otaTotal = server.header("X-Firmware-Size").toInt();
     drawUpdateProgress(0);
+    setBacklight(max(brightness, BRIGHTNESS));  // so the update and how it went show at night
     otaOk = Update.begin(otaTotal ? otaTotal : UPDATE_SIZE_UNKNOWN);
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (!otaAuthed || !otaOk) return;
@@ -1192,17 +1202,18 @@ struct Pick {
 };
 
 // Chooses the card to show. Needs-input alerts come first (the one waiting longest), except that
-// the session you have open in the Claude app shows its CI checks instead of its own alert; then
-// the newest finished session's green card, until you reply. Dismissed cards stay hidden until
-// something new happens.
-static Pick pickCard(bool stale) {
+// the session you have open in the Claude app shows its CI checks instead of its own alert, unless
+// alertFirst (at night, so the alert lights the screen); then the newest finished session's green
+// card, until you reply. Dismissed cards stay hidden until something new happens.
+static Pick pickCard(bool stale, bool alertFirst) {
   Pick p;
   if (stale) return p;
   p.ci = st.ci.present && st.ci.key != dismissedCI;
   for (const Session &s : st.sessions) {
     if (s.state == "waiting") {
       p.waiting++;
-      if (!p.alert && dismissedWaiting.indexOf(sessionKey(s)) < 0 && !(p.ci && s.id == st.ci.id)) p.alert = &s;
+      if (!p.alert && dismissedWaiting.indexOf(sessionKey(s)) < 0 && !(p.ci && s.id == st.ci.id && !alertFirst))
+        p.alert = &s;
     } else if (s.state == "done" && !p.done && dismissedDone.indexOf(sessionKey(s)) < 0) {
       p.done = &s;  // the helper sends the newest first
     }
@@ -1230,7 +1241,7 @@ void setup() {
   pinMode(PIN_BOOT, INPUT_PULLUP);
 
   lcd.init();
-  lcd.setBrightness(160);
+  setBacklight(160);
   lcd.fillScreen(TFT_BLACK);
   frame.setColorDepth(16);
   if (!frame.createSprite(240, 240)) {
@@ -1255,16 +1266,21 @@ void setup() {
 
   prefs.begin("claude-status", false);
   idleBrightness = prefs.getUChar("bright", DEFAULT_BRIGHTNESS);
-  nightFrom = prefs.getUShort("nightFrom", DEFAULT_NIGHT_FROM);
-  nightTo = prefs.getUShort("nightTo", DEFAULT_NIGHT_TO);
 #ifdef BOARD_LILYGO_T_RGB
   lcd.setWhiteBalance(prefs.getUChar("wbR", TRGB_WB_R), prefs.getUChar("wbG", TRGB_WB_G), prefs.getUChar("wbB", TRGB_WB_B));
 #endif
   pairKey = prefs.getString("key", "");
   showCat = prefs.getBool("cat", true);
+  nightMode.enabled = prefs.getBool("night", nightMode.enabled);
+  nightMode.start = prefs.getUShort("nstart", nightMode.start);
+  nightMode.end = prefs.getUShort("nend", nightMode.end);
+  nightMode.dim = prefs.getBool("ndim", nightMode.dim);
+  nightMode.alerts = prefs.getBool("nalert", nightMode.alerts);
   String savedTz = prefs.getString("tz", DEFAULT_TZ);
   configTzTime(savedTz.c_str(), "pool.ntp.org", "time.google.com");
   applyTimezone(savedTz);
+  // The clock keeps going through a restart (not a power cut), so a restart at night stays dark
+  if (nightActive(nightMode, time(nullptr))) setBacklight(backlight(nightMode, true, false, false, false));
 
   bool wifiReset = checkPowerCycleReset();
   if (powerCycles == RESET_POWER_CYCLES - 1) {
@@ -1289,6 +1305,12 @@ void setup() {
   wifiManager.setConnectTimeout(20);
   wifiManager.setTitle("Claude Monitor");
   wifiManager.setShowInfoUpdate(false);
+  // A scan for networks takes seconds, and the setup network goes quiet while it runs, so the
+  // phone's Wi-Fi page froze waiting for one. loop() scans once as soon as setup opens instead;
+  // these make WiFiManager record that scan's results and keep them, rather than scanning
+  // again when the page is opened. The page's Refresh link still scans on demand.
+  wifiManager._asyncScan = true;
+  wifiManager._scancachetime = 10 * 60 * 1000;
   if (!wifiManager.autoConnect(SETUP_AP)) Serial.printf("Wi-Fi setup open: join \"%s\"\n", SETUP_AP);
 
   server.on("/state", HTTP_POST, handleState);
@@ -1296,7 +1318,6 @@ void setup() {
   server.on("/screen.bmp", HTTP_GET, handleScreenshot);
   server.on("/wifi/reset", HTTP_POST, handleWifiReset);
   server.on("/brightness", handleBrightness);
-  server.on("/sleep", handleSleep);
 #ifdef BOARD_LILYGO_T_RGB
   server.on("/whitebalance", handleWhiteBalance);
 #endif
@@ -1369,11 +1390,23 @@ void loop() {
   if (wifiManager.getConfigPortalActive()) {
     wifiManager.process();
     if (!connected) {
-      if (!handleBootButton()) {
+      // Scan for networks once, in the background, before anyone has joined (see setup())
+      static uint32_t scanTriedAt = 0;
+      static bool scanStarted = false;
+      if (!scanStarted && millis() - scanTriedAt > 1000) {
+        scanTriedAt = millis();
+        scanStarted = WiFi.scanNetworks(true) == WIFI_SCAN_RUNNING;
+      }
+      setBacklight(max(brightness, BRIGHTNESS));  // lit even at night: the display needs setting up
+      // About 10 frames a second is plenty for this screen, and in between the loop answers
+      // the phone's requests straight away instead of once per frame
+      static uint32_t drawnAt = 0;
+      if (!handleBootButton() && millis() - drawnAt >= 100) {
+        drawnAt = millis();
         drawWifiSetup();
         showFrame();
       }
-      delay(15);
+      delay(2);
       return;
     }
     wifiManager.stopConfigPortal();  // joined a network: close the setup network
@@ -1408,6 +1441,7 @@ void loop() {
 
   bool pressed = false;
   if (handleBootButton(&pressed)) {
+    setBacklight(max(brightness, BRIGHTNESS));  // so the countdown shows at night
     delay(15);
     return;
   }
@@ -1416,25 +1450,6 @@ void loop() {
   // closes them, or otherwise dismisses the card on screen
   static uint32_t doubles = 0, fives = 0, diagnosticsSince = 0;
   uint32_t d = doubleTapCount(), f = fiveTapCount();
-
-  // Night hours: the screen sleeps unless Claude needs you. Any tap (or BOOT) wakes it, and the
-  // gesture that woke it doesn't also dismiss a card or open diagnostics.
-  static uint32_t touches = touchCount(), wokeAt = 0, swallowUntil = 0;
-  uint32_t t = touchCount();
-  bool poked = pressed || d != doubles || f != fives || t != touches;
-  touches = t;
-  bool night = nightNow();
-  bool asleep = night && !(wokeAt && millis() - wokeAt < WAKE_MS);
-  if (night && poked) {
-    if (asleep) swallowUntil = millis() + 1000;  // a double tap is only counted once its run ends
-    wokeAt = millis() | 1;
-    asleep = false;
-  }
-  if ((int32_t)(swallowUntil - millis()) > 0) {
-    pressed = false;
-    doubles = d;
-    fives = f;
-  }
 
   bool dismiss = pressed || d != doubles;
   if (f != fives) {
@@ -1447,12 +1462,31 @@ void loop() {
   fives = f;
 
   bool stale = st.valid && millis() - st.rxMillis > STALE_MS;
-  Pick card = pickCard(stale);
+  bool night = nightActive(nightMode, time(nullptr));
+  bool alertFirst = night && nightMode.alerts;
+  Pick card = pickCard(stale, alertFirst);
+
+  // At night a double tap or BOOT press on the dark screen only lights it for a peek. During a
+  // peek they dismiss cards as usual, and keep it lit for longer. A double tap is only recognised
+  // about half a second after it (taps.cpp), so one just after the screen went dark or lit is
+  // judged by how it looked before.
+  static uint32_t peekSince = 0, peekLitAt = 0, darkChanged = 0;
+  static bool dark = night, wasDark = false;  // setup() leaves the screen dark at night
+  if (peekSince && (!night || millis() - peekSince > NIGHT_PEEK_MS)) peekSince = 0;
+  if (dismiss && !diagnosticsSince) {
+    if (millis() - darkChanged < TAP_DELAY_MS ? wasDark : dark) {
+      if (night) peekSince = millis() | 1;
+      dismiss = false;
+    } else if (night && millis() - peekLitAt < TAP_DELAY_MS) {
+      peekSince = millis() | 1;
+    }
+  }
+
   if (dismiss && !diagnosticsSince) {
     if (card.alert) dismissedWaiting = stateKey("waiting");
     else if (card.ci) dismissedCI = st.ci.key;
     else if (card.done) dismissedDone = stateKey("done");
-    card = pickCard(stale);
+    card = pickCard(stale, alertFirst);
   }
 
   if (diagnosticsSince) drawDiagnostics(millis() - diagnosticsSince);
@@ -1462,9 +1496,17 @@ void loop() {
   else drawStatus(stale);
   showFrame();
 
-  static int brightness = -1;
-  int want = card.alert && !diagnosticsSince ? 255 : asleep ? 0 : idleBrightness;
-  if (want != brightness) lcd.setBrightness(brightness = want);
+  int level = backlight(nightMode, night, diagnosticsSince, peekSince, card.alert);
+  setBacklight(level == BRIGHTNESS ? idleBrightness : level);  // normal brightness is adjustable (/brightness)
+  // When the screen last went dark or lit, for judging taps. Diagnostics are left out: a tap that
+  // comes just after they close is judged by the screen underneath.
+  bool nowDark = nightDark(nightMode, night, false, peekSince, card.alert);
+  if (nowDark != dark) {
+    wasDark = dark;
+    dark = nowDark;
+    darkChanged = millis();
+  }
+  if (peekSince) peekLitAt = millis();
 
   delay(15);
 }

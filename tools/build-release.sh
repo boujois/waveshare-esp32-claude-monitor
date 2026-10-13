@@ -1,9 +1,11 @@
 #!/bin/sh
 # Builds everything for a release into dist/:
-#   dist/Claude-Monitor-Mac.zip          double-click Mac installer + helper
+#   dist/Claude-Monitor-Mac.zip          installer: the display's software, Mac helper + menu bar app
 #   dist/claude-monitor-firmware.bin     single image to flash at 0x0 (any flasher)
-#   dist/web/                            browser installer page (ESP Web Tools) + firmware parts
+#   dist/web/                            browser installer page (ESP Web Tools) + firmware parts,
+#                                        and install.sh, the one-line Mac install
 # Usage: tools/build-release.sh [version]     (used locally and by .github/workflows/release.yml)
+# Needs macOS with Xcode or the Command Line Tools 16 or later, for the menu bar app (Swift 6).
 set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${1:-dev}"
@@ -11,6 +13,16 @@ DIST="$ROOT/dist"
 FW="$ROOT/claude-status/firmware"
 BUILD="$FW/.pio/build/waveshare-s3-lcd128"
 PIO_HOME="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
+
+# Check before the long firmware build, not after
+if [ "$(uname -s)" != Darwin ]; then
+  echo "ERROR: the Mac package includes the menu bar app, which can only be built on macOS" >&2
+  exit 1
+fi
+if ! xcrun --find swiftc >/dev/null 2>&1; then
+  echo "ERROR: swiftc not found - install Xcode or the Command Line Tools 16 or later (xcode-select --install)" >&2
+  exit 1
+fi
 
 rm -rf "$DIST" && mkdir -p "$DIST/web"
 
@@ -41,7 +53,7 @@ esptool --chip esp32s3 merge_bin -o "$DIST/claude-monitor-firmware.bin" \
   0xe000 "$BOOT_APP0" 0x10000 "$BUILD/firmware.bin"
 
 # Browser installer: separate parts so updates don't wipe the saved Wi-Fi (NVS at 0x9000)
-cp "$ROOT/claude-status/package/web/index.html" "$DIST/web/"
+cp "$ROOT/claude-status/package/web/index.html" "$ROOT/claude-status/package/web/install.sh" "$DIST/web/"
 cat > "$DIST/web/manifest.json" <<EOF
 {
   "name": "Claude Monitor",
@@ -70,20 +82,38 @@ cp "$ROOT/claude-status/package/Install.command" "$ROOT/claude-status/package/Up
 (cd "$ROOT/claude-status/bridge" && cp claude_status_bridge.py chat_mcp.py hooks.py desktop_config.py update.py \
   update-skill.md find_python.sh install.sh uninstall.sh update.sh install-chat-connector.sh "$PKG/helper/")
 echo "$VERSION" > "$PKG/helper/VERSION"
-chmod +x "$PKG"/*.command "$PKG"/helper/*.sh
+# The display's software, for Install.command to put on over USB: the installer page's parts
+mkdir -p "$PKG/firmware"
+cp "$DIST/web/bootloader.bin" "$DIST/web/partitions.bin" "$DIST/web/boot_app0.bin" "$DIST/web/firmware.bin" \
+  "$ROOT/claude-status/package/flash-display.sh" "$PKG/firmware/"
+chmod +x "$PKG"/*.command "$PKG"/helper/*.sh "$PKG"/firmware/*.sh
+echo "== Building the menu bar app"
+/bin/sh "$ROOT/claude-status/menubar/build.sh" "$PKG/helper" "$VERSION"
+# Zipped as well, for installs updating from before the menu bar app: their update.py
+# copies plain files only, and install.sh unpacks this when the app didn't come across
+(cd "$PKG/helper" && zip -qry "Claude Monitor.app.zip" "Claude Monitor.app")
 cat > "$PKG/READ ME FIRST.txt" <<EOF
-Claude Monitor $VERSION - Mac setup
+Claude Monitor $VERSION - setup
 
-1. Make sure the display is flashed and on your Wi-Fi (see the installer page
-   linked from the project README).
-2. Right-click "Install.command" and choose Open. (macOS blocks double-clicking
-   downloaded scripts the first time; if it still refuses, open System Settings >
-   Privacy & Security and click "Open Anyway".)
-3. Follow the questions in the window that opens.
+1. Plug the display into this Mac with a USB-C cable that carries data, unless
+   it's already set up and on your Wi-Fi.
+2. Double-click "Install.command". macOS stops it the first time ("Apple could
+   not verify..."): click Done, then open System Settings > Privacy & Security
+   and click "Open Anyway". (On macOS 14 or older, right-click it and choose
+   Open instead.)
+   Or skip that step: paste this line into Terminal, which downloads and runs
+   the same installer:
+   /bin/bash -c "\$(curl -fsSL https://boujois.github.io/waveshare-esp32-claude-monitor/install.sh)"
+3. Follow along. It puts the software on the display, tells you when to connect
+   the display to your Wi-Fi from your phone, and sets up your Mac.
+4. Then click the Claude Monitor icon in the menu bar (a small circle inside a
+   circle, near the clock) to connect your plan usage, set up night mode and
+   change other options. It needs macOS 13 or later.
 
-To update later, right-click "Update.command" and choose Open (or just ask
-Claude Code to "update my Claude monitor"). To remove everything, right-click
-"Uninstall.command" and choose Open.
+To update later, click Update in the menu bar app when it offers one,
+double-click "Update.command", or ask Claude Code to "update my Claude
+monitor". To remove everything, double-click "Uninstall.command", or run it
+from the Claude Monitor folder in ~/Library/Application Support.
 EOF
 (cd "$DIST/pkg" && zip -qry "$DIST/Claude-Monitor-Mac.zip" "Claude Monitor")
 rm -rf "$DIST/pkg"

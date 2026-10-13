@@ -1,6 +1,7 @@
 #!/bin/bash
-# Claude Monitor - removes the Mac helper, hooks and chat connector.
-# Double-click to run (the first time, right-click > Open).
+# Claude Monitor - removes the Mac helper, hooks, chat connector and menu bar app.
+# Double-click to run (macOS asks you to allow it the first time). The installer also keeps a
+# copy in ~/Library/Application Support/Claude Monitor, to run from Terminal.
 
 DEST="$HOME/Library/Application Support/Claude Monitor"
 printf '\n\033[1mClaude Monitor - uninstall\033[0m\n'
