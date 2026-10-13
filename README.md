@@ -10,8 +10,12 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
   <img src="docs/images/alert-question.png" width="200" alt="Question alert: Claude is asking a question in the 'Write release notes' session">
   &nbsp;
   <img src="docs/images/status.png" width="200" alt="Status screen: time, plan usage rings with pace ticks, the cat typing beside '3 working', and a list of sessions with timers">
-  &nbsp;
+  <br><br>
   <img src="docs/images/status-high-usage.png" width="200" alt="Status screen with high usage: rings turn yellow and red, and the cat cheers beside 'All done'">
+  &nbsp;
+  <img src="docs/images/ci-checks.png" width="200" alt="CI card: the checks on a pull request as a ring of eight segments, five passed, two running and one queued">
+  &nbsp;
+  <img src="docs/images/wifi-setup.png" width="200" alt="Wi-Fi setup screen: a QR code to scan with your phone to join the Claude-Monitor-Setup network">
 </p>
 
 <p align="center"><sub>Real screenshots, grabbed straight off the device (with made-up session names).</sub></p>
