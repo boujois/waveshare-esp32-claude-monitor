@@ -109,6 +109,8 @@ enum Snapshot {
                                        d7Reset: thursday, at: now - 120)
             status.nightActive = true
             status.counts = SessionCounts(waiting: 1, busy: 2, error: 0, done: 0, idle: 1)
+            status.display?.card = DisplayCard(key: "alert;Fix login redirect|0;", icon: "exclamation",
+                                               title: "Permission", name: "Fix login redirect")
         case "off":
             break
         case "signed_out", "signing_in":
