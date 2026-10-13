@@ -17,6 +17,7 @@ final class MonitorModel: ObservableObject {
     @Published private(set) var connecting = false
     @Published private(set) var retrying = false
     @Published private(set) var startingHelper = false
+    @Published private(set) var dismissing = false
     /// Set for a few minutes after Update opened Terminal, so a second click doesn't start a second update.
     @Published private(set) var updating = false
     /// Set while waiting for the user to finish `claude auth login` in Terminal.
@@ -305,6 +306,24 @@ final class MonitorModel: ObservableObject {
     func disconnectUsage() {
         stopWaitingForSignIn()
         set("plan_usage", .bool(false), in: .usage)
+    }
+
+    // MARK: Display
+
+    /// Dismisses the card on the display's screen, like a double tap. The helper answers with the
+    /// card that shows now, if any.
+    func dismissCard() {
+        guard !dismissing, let key = status?.display?.card?.key else { return }
+        dismissing = true
+        clearError(.header)
+        Task {
+            defer { dismissing = false }
+            do {
+                accept(try await client.dismissCard(key))
+            } catch {
+                failed(error, section: .header)
+            }
+        }
     }
 
     // MARK: Helper

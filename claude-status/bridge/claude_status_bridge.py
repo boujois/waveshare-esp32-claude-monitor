@@ -15,6 +15,7 @@ ESP32 status display over Wi-Fi:
 The Claude Monitor menu bar app changes these options while the helper runs, through
 GET/POST /settings, POST /usage/connect and POST /usage/refresh on the same port.
 Changes are saved to config.json and take effect within a second, without a restart.
+It can also dismiss the card on the display's screen (POST /display/dismiss).
 
 Standard library only. Run directly or via the launchd agent (see install.sh).
 """
@@ -1264,6 +1265,23 @@ class Device:
         self.ip = None
         self.ok = None  # whether the last push got through; None before the first
         self.last_push = 0  # when a push last got through
+        # The card on the display's screen ({"key", "icon", "title", "name"}) or None, from its
+        # replies to pushes and dismissals. Firmware from before Dismiss in the menu bar app never says.
+        self.card = None
+        self._card_asked = 0  # when the request it came from was sent
+        self._card_lock = threading.Lock()
+
+    def _got_card(self, asked, reply):
+        """Notes the card from the display's reply to a request sent at asked, unless a later
+        request has already answered (a push and a dismissal can cross)."""
+        card = reply.get("card") if isinstance(reply, dict) else None
+        if isinstance(card, dict) and isinstance(card.get("key"), str) and card["key"]:
+            card = {k: str(card.get(k) or "") for k in ("key", "icon", "title", "name")}
+        else:
+            card = None
+        with self._card_lock:
+            if asked >= self._card_asked:
+                self._card_asked, self.card = asked, card
 
     def _resolve(self):
         try:
@@ -1278,16 +1296,22 @@ class Device:
             return False
         req = urllib.request.Request(f"http://{self.ip}/state", data=payload,
                                      headers={"Content-Type": "application/json"}, method="POST")
+        asked = time.monotonic()
         try:
             with urllib.request.urlopen(req, timeout=3) as r:
-                r.read()
+                reply = r.read()
             self.last_push = time.time()
             self._set_ok(True, f"pushing to {self.host} ({self.ip})")
-            return True
         except OSError as e:
+            self._got_card(asked, None)
             self._set_ok(False, f"push to {self.ip} failed: {e}")
             self.ip = None  # re-resolve next time (DHCP may have moved it)
             return False
+        try:
+            self._got_card(asked, json.loads(reply))
+        except ValueError:
+            self._got_card(asked, None)
+        return True
 
     def _set_ok(self, ok, msg):
         if ok != self.ok:
@@ -1309,6 +1333,17 @@ class Device:
                                      headers={"Content-Type": "text/plain"})  # form encoding would hide it
         with urllib.request.urlopen(req, timeout=5) as r:
             r.read()
+
+    def dismiss(self, key):
+        """Dismisses the card on the display's screen, like a double tap, if it's still the one
+        with this key. Returns whether it was; self.card then holds the card on screen now."""
+        req = urllib.request.Request(self._url("/dismiss"), data=json.dumps({"key": key}).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+        asked = time.monotonic()
+        with urllib.request.urlopen(req, timeout=5) as r:
+            reply = json.load(r)
+        self._got_card(asked, reply)
+        return reply.get("dismissed") is True if isinstance(reply, dict) else False
 
     def push_firmware(self, key, data):
         """Sends a firmware image (the app part, e.g. firmware.bin) to the display, which
@@ -1335,6 +1370,10 @@ CLOCK_TIME = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")  # 24-hour HH:MM
 
 class SettingError(ValueError):
     """A settings change that can't be applied; the message is shown in the menu bar app."""
+
+
+class DisplayError(Exception):
+    """The display couldn't do what the menu bar app asked; the message is shown there."""
 
 
 def check_setting(key, value):
@@ -1455,25 +1494,34 @@ def make_handler(bridge):
                     elif chats:
                         chats.add_question(body.get("question"), body.get("chat_title"))
                 return self._reply(200)
-            if self.path not in ("/settings", "/usage/connect", "/usage/refresh"):
+            if self.path not in ("/settings", "/usage/connect", "/usage/refresh", "/display/dismiss"):
                 return self._reply(404, {"error": "Not found"})
             # Requiring JSON makes a browser ask first (a CORS preflight), which goes unanswered
             if self.headers.get_content_type() != "application/json":
                 return self._reply(415, {"error": "Content-Type must be application/json"})
             extra = {}
             try:
-                if self.path == "/settings":
+                if self.path in ("/settings", "/display/dismiss"):
                     try:
-                        changes = json.loads(raw or b"{}")
+                        body = json.loads(raw or b"{}")
                     except ValueError:
                         raise SettingError("The request isn't valid JSON") from None
-                    bridge.change_settings(changes)
+                if self.path == "/settings":
+                    bridge.change_settings(body)
+                elif self.path == "/display/dismiss":
+                    # {"key": ...} from the card in GET /settings; without one, whatever is on screen
+                    key = body.get("key") if isinstance(body, dict) else None
+                    if key is not None and not isinstance(key, str):
+                        raise SettingError("key must be a string")
+                    bridge.dismiss_card(key)
                 elif self.path == "/usage/connect":
                     extra["signed_in"] = bridge.connect_usage()
                 else:
                     bridge.usage.refresh()
             except SettingError as e:
                 return self._reply(400, {"error": str(e)})
+            except DisplayError as e:
+                return self._reply(502, {"error": str(e)})
             except (OSError, ValueError) as e:
                 log("couldn't save config.json:", e)
                 return self._reply(500, {"error": f"Couldn't save the settings: {e}"})
@@ -1483,6 +1531,7 @@ def make_handler(bridge):
             if not self._allowed():
                 return self._reply(403, {"error": "Forbidden"})
             if self.path == "/settings":
+                bridge.watch_card()
                 return self._reply(200, bridge.settings_body())
             if self.path == "/state":
                 state = json.loads(bridge.payload or b"{}")
@@ -1534,6 +1583,7 @@ class Bridge:
         self.display = {"version": None, "paired": None, "night": None, "next": 0}  # night: has night mode
         self.state = {}  # the latest state for the display
         self.payload = None  # ...as sent, with its timestamp
+        self.push_soon = False  # push on the next pass even if nothing changed
 
     def settings(self):
         with self.lock:
@@ -1584,6 +1634,26 @@ class Bridge:
         self.usage.refresh()
         return signed_in
 
+    def dismiss_card(self, key):
+        """POST /display/dismiss: dismisses the card on the display's screen if it's still the
+        one with this key (any card, with None). Raises DisplayError."""
+        try:
+            dismissed = self.device.dismiss(key)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                raise DisplayError("Update the display to dismiss its alerts from here.") from None
+            raise DisplayError(f"The display refused (HTTP {e.code}).") from None
+        except (OSError, ValueError) as e:
+            log("dismiss failed:", e)
+            raise DisplayError("Couldn't reach the display.") from None
+        log("dismissed the card on the display" if dismissed else "dismiss: the display's card had changed")
+
+    def watch_card(self):
+        """The menu bar app is looking. A card dismissed on the display (a double tap) goes
+        without a push, so push soon to hear what's on screen now."""
+        if self.device.card:
+            self.push_soon = True
+
     def update_available(self):
         """The latest release when the helper or the display is behind it, else None."""
         tag, current = self.release["tag"], self.display["version"]
@@ -1602,7 +1672,7 @@ class Bridge:
             "claude_cli": claude_cli(),
             "display": {"host": self.device.host, "reachable": self.device.ok,
                         "version": self.display["version"], "last_push": int(self.device.last_push),
-                        "night_mode": self.display["night"]},
+                        "night_mode": self.display["night"], "card": self.device.card},
             "update": self.update_available(),
             "usage": self.usage.status(),
             "night_active": night_active(s),
@@ -1724,11 +1794,12 @@ class Bridge:
             body = json.dumps(state, separators=(",", ":"))
             payload = json.dumps({**state, "t": int(now)}, separators=(",", ":")).encode()
             self.state, self.payload = state, payload
-            due = body != last_sent or now - last_push >= cfg["heartbeat_interval"]
+            due = body != last_sent or now - last_push >= cfg["heartbeat_interval"] or self.push_soon
             if self.device.ok is False and now - last_push < 5:
                 due = False  # device unreachable: retry every few seconds, not every loop
             if due:
                 last_push = now
+                self.push_soon = False
                 was_ok = self.device.ok
                 if self.device.push(payload):
                     last_sent = body

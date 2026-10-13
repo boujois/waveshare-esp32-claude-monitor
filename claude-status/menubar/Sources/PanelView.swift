@@ -68,6 +68,9 @@ private struct HeaderSection: View {
             case .online:
                 DisplayLine(display: model.status?.display)
                 SessionsLine(counts: model.status?.counts)
+                if let card = model.status?.display?.card, card.key != nil {
+                    CardLine(model: model, card: card)
+                }
                 if let incident = model.status?.incident {
                     Label {
                         Text(incident.name ?? "Claude incident").fixedSize(horizontal: false, vertical: true)
@@ -122,6 +125,63 @@ private struct SessionsLine: View {
         if let n = c?.done, n > 0 { parts.append("\(n) done") }
         if let n = c?.idle, n > 0 { parts.append("\(n) idle") }
         return parts.isEmpty ? "No active sessions" : parts.joined(separator: " · ")
+    }
+}
+
+/// The card on the display's screen, drawn like a small copy of it, with Dismiss.
+private struct CardLine: View {
+    @ObservedObject var model: MonitorModel
+    let card: DisplayCard
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: symbol)
+                .font(.system(size: 18))
+                .foregroundStyle(.white, tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(card.title?.nonEmpty ?? "On the display")
+                    .font(.system(size: 12, weight: .semibold))
+                if let name = card.name?.nonEmpty {
+                    Text(name)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+            }
+            Spacer(minLength: 6)
+            Button("Dismiss", action: model.dismissCard)
+                .controlSize(.small)
+                .disabled(model.dismissing)
+                .help("Hide it on the display, like a double tap, until something new happens")
+                .accessibilityLabel("Dismiss \(card.title ?? "card") on the display")
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(tint.opacity(0.12)))
+        .padding(.top, 3)
+    }
+
+    /// The display's own symbol and colour for the card
+    private var symbol: String {
+        switch card.icon {
+        case "question": return "questionmark.circle.fill"
+        case "check": return "checkmark.circle.fill"
+        case "cross": return "xmark.circle.fill"
+        case "spinner": return "arrow.triangle.2.circlepath.circle.fill"
+        case "dash": return "minus.circle.fill"
+        default: return "exclamationmark.circle.fill"
+        }
+    }
+
+    private var tint: Color {
+        switch card.icon {
+        case "check": return .green
+        case "cross": return .red
+        case "spinner": return .blue
+        case "dash": return .gray
+        default: return Color(red: 0.85, green: 0.47, blue: 0.34)  // Claude's orange, as on the display
+        }
     }
 }
 

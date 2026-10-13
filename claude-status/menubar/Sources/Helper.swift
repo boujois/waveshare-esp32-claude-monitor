@@ -61,11 +61,20 @@ struct DisplayStatus: Decodable, Sendable {
     var version: String?    // "old" = firmware from before Wi-Fi updates
     var lastPush: Double?
     var nightMode: Bool?    // false = firmware from before night mode; nil until known
+    var card: DisplayCard?  // nil for the status screen, and from firmware before Dismiss
 
     enum CodingKeys: String, CodingKey {
-        case host, reachable, version
+        case host, reachable, version, card
         case lastPush = "last_push", nightMode = "night_mode"
     }
+}
+
+/// The card on the display's screen: a needs-input alert, a Done card or CI checks.
+struct DisplayCard: Decodable, Sendable {
+    var key: String?
+    var icon: String?   // the symbol in its circle: exclamation | question | check | cross | spinner | dash
+    var title: String?  // its headline, e.g. "Permission"
+    var name: String?   // the session's name, or the pull request's
 }
 
 struct UsageStatus: Decodable, Sendable {
@@ -180,6 +189,13 @@ struct HelperClient: Sendable {
 
     func refreshUsage() async throws -> SettingsResponse {
         try await send(request("usage/refresh", body: Data("{}".utf8)))
+    }
+
+    /// Dismisses the card on the display, if it's still the one with this key (up to 5 s).
+    func dismissCard(_ key: String) async throws -> SettingsResponse {
+        var req = request("display/dismiss", body: try JSONEncoder().encode(["key": key]))
+        req.timeoutInterval = 10
+        return try await send(req)
     }
 
     private func request(_ path: String, body: Data? = nil, timeout: TimeInterval = 5) -> URLRequest {
