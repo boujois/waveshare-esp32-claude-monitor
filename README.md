@@ -10,8 +10,12 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
   <img src="docs/images/alert-question.png" width="200" alt="Question alert: Claude is asking a question in the 'Write release notes' session">
   &nbsp;
   <img src="docs/images/status.png" width="200" alt="Status screen: time, plan usage rings with pace ticks, the cat typing beside '3 working', and a list of sessions with timers">
-  &nbsp;
+  <br><br>
   <img src="docs/images/status-high-usage.png" width="200" alt="Status screen with high usage: rings turn yellow and red, and the cat cheers beside 'All done'">
+  &nbsp;
+  <img src="docs/images/ci-checks.png" width="200" alt="CI card: the checks on a pull request as a ring of eight segments, five passed, two running and one queued">
+  &nbsp;
+  <img src="docs/images/wifi-setup.png" width="200" alt="Wi-Fi setup screen: a QR code to scan with your phone to join the Claude-Monitor-Setup network">
 </p>
 
 <p align="center"><sub>Real screenshots, grabbed straight off the device (with made-up session names).</sub></p>
@@ -52,7 +56,7 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
 - **What it wants**, e.g. `Bash: npm run test:e2e`, or the question Claude is asking
 - **How long it's been waiting**, and how many other sessions are waiting too
 
-The alert clears itself as soon as you respond, so you don't need to touch the device. To hide it sooner, **double-tap the case**.
+The alert clears itself as soon as you respond, so you don't need to touch the device. To hide it sooner, **double-tap the case**, or click **Dismiss** in the [menu bar app](#the-menu-bar-app).
 
 **⚪ The rest of the time**, you get a calm status screen:
 
@@ -368,13 +372,14 @@ To turn chat alerts off, switch off **Claude app chat alerts** in the menu bar a
 
 ## The menu bar app
 
-<img src="docs/images/menubar.png" width="240" align="right" alt="The Claude Monitor panel: display connected, plan usage bars for 5-hour and weekly, night mode from 22:00 to 07:00, and switches for the cat, CI checks, incidents, chat alerts and reply checks">
+<img src="docs/images/menubar.png" width="240" align="right" alt="The Claude Monitor panel: display connected, a Permission alert on the display with a Dismiss button, plan usage bars for 5-hour and weekly, night mode from 22:00 to 07:00, and switches for the cat, CI checks, incidents, chat alerts and reply checks">
 
 Claude Monitor puts a small icon in your Mac's menu bar, near the clock: a **circle inside a circle**. It turns into a **moon** during night mode hours, and a **dashed circle** when the Mac helper isn't running.
 
 Click it for:
 
 - **Status:** whether the display is connected, and which firmware it runs; your sessions, e.g. *1 needs you · 2 working*; any Anthropic incident; and an **Update to v1.x.x…** button when there's a new release.
+- **What's on the display:** the alert, Done card or CI card on its screen, with a **Dismiss** button that hides it just like a double tap. This needs display firmware newer than v1.5.0 (see [Updating](#updating)).
 - **Plan usage:** **Connect**, then your 5-hour and weekly usage and when each resets. **Disconnect** turns it off. See [step 6](#6-optional-turn-on-plan-usage-rings).
 - **Night mode:** on or off, **From** and **To** times, **Screen** *Off* or *Dim*, and **Alerts still light it up**. See [Night mode](#night-mode).
 - **Display:** switches for **Cat**, **CI checks** and **Anthropic incidents**.
@@ -489,7 +494,7 @@ Prefer the plain status screen? Switch off **Cat** in the [menu bar app](#the-me
 
 If several sessions are waiting, the one that has waited longest is shown, and the footer says `+N more`.
 
-**Want it to go away?** Double-tap the case: two quick, firm taps with a fingertip, anywhere on the case. A short press of the **BOOT** button does the same, if your case leaves it reachable. That hides the alert until a *new* request comes in, and the status screen then shows `N waiting` in orange instead.
+**Want it to go away?** Double-tap the case: two quick, firm taps with a fingertip, anywhere on the case. A short press of the **BOOT** button does the same, if your case leaves it reachable. That hides the alert until a *new* request comes in, and the status screen then shows `N waiting` in orange instead. **Dismiss** in the [menu bar app](#the-menu-bar-app) does the same from your Mac.
 
 Double tap uses the board's built-in motion sensor. Typing, putting a mug down or knocking on the desk doesn't set it off, and neither does picking the display up.
 
@@ -503,7 +508,7 @@ The card goes away when:
 - **you reply** to that session
 - **you look at it:** open that session in the Claude app, with the app in front
 - **you were already watching:** if the session finishes while it's open in front of you, no card appears
-- **you double-tap the case** (or press **BOOT**): the sessions on the card stay hidden, and a session that finishes later still gets its own card
+- **you double-tap the case** (or press **BOOT**, or click **Dismiss** in the menu bar app): the sessions on the card stay hidden, and a session that finishes later still gets its own card
 
 A quick acknowledgement like *"thanks"*, *"ok"* or 👍 doesn't bring the card back when Claude answers it.
 
@@ -517,7 +522,7 @@ When the session you have open in the Claude app is on a branch with an open pul
 
 It follows the session you last opened in the Claude app, so it stays up while you switch to another app to wait. A question or permission request from **another** session still comes first. The CI card then comes before the open session's own requests, which you can see in the app anyway, and before Done cards.
 
-Passed checks stay on screen for 10 minutes, then the status screen comes back (`ci_passed_window` in `config.json`). Failed checks stay until you push again. Double-tap to hide the card until the checks change.
+Passed checks stay on screen for 10 minutes, then the status screen comes back (`ci_passed_window` in `config.json`). Failed checks stay until you push again. Double-tap, or click **Dismiss** in the menu bar app, to hide the card until the checks change.
 
 The helper asks GitHub with the [GitHub CLI](https://cli.github.com) (`gh`), every 15 seconds while checks run and every minute otherwise, so `gh` needs to be installed and signed in. Sessions in the terminal or an IDE don't get a CI card: only the Claude app tells the helper which session you have open. To turn the CI card off, switch off **CI checks** in the menu bar app.
 
@@ -645,7 +650,7 @@ Re-flash after changing anything with `pio run -t upload`.
 <details>
 <summary><b>An alert won't go away</b></summary>
 
-Alerts clear when the tool finishes, when you send a new prompt, or when Claude's turn ends. If you deny a permission and Claude stops quietly, the alert clears when that turn ends. You can also double-tap the case to dismiss it, or press **BOOT** if your case leaves the button reachable.
+Alerts clear when the tool finishes, when you send a new prompt, or when Claude's turn ends. If you deny a permission and Claude stops quietly, the alert clears when that turn ends. You can also double-tap the case to dismiss it, press **BOOT** if your case leaves the button reachable, or click **Dismiss** in the menu bar app.
 </details>
 
 <details>

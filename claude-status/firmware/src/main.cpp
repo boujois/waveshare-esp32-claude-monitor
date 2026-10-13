@@ -6,8 +6,9 @@
 // session status, plan usage rings (5-hour outer, weekly inner) and today's activity, with a
 // tabby cat acting out what's going on (see cat.cpp). The cat also walks across at power-on.
 // Double-tapping the case dismisses the alert or Done card on screen, as does a short press of the
-// BOOT button if your case leaves it reachable; tapping it five times quickly shows diagnostics
-// (see taps.cpp). Holding BOOT for 5 seconds forgets the Wi-Fi network and reopens Wi-Fi setup.
+// BOOT button if your case leaves it reachable, or Dismiss in the Mac's menu bar app (POST /dismiss);
+// tapping it five times quickly shows diagnostics (see taps.cpp). Holding BOOT for 5 seconds
+// forgets the Wi-Fi network and reopens Wi-Fi setup.
 // Without the button: power the display on 3 times in a row (each within 10 s of the last), or
 // POST http://claude-status.local/wifi/reset.
 //
@@ -410,6 +411,8 @@ static String describeNight(const NightMode &n) {
          (n.alerts ? "on" : "off");
 }
 
+static void replyWithCard(JsonDocument &reply);
+
 static void handleState() {
   JsonDocument doc;
   if (deserializeJson(doc, server.arg("plain"))) {
@@ -507,7 +510,9 @@ static void handleState() {
   if (n.alerts != nightMode.alerts) prefs.putBool("nalert", n.alerts);
   if (describeNight(n) != describeNight(nightMode)) Serial.println("Night mode " + describeNight(n));
   nightMode = n;
-  server.send(200, "application/json", "{\"ok\":true}");
+  JsonDocument reply;
+  reply["ok"] = true;
+  replyWithCard(reply);
 }
 
 #ifdef BOARD_LILYGO_T_RGB
@@ -795,6 +800,13 @@ static void drawDone(const Session &s, int others) {
   drawCardFooter("finished ", " ago", s.since, others);
 }
 
+static const char *ciHeadline(const CI &ci) {
+  if (ci.status == "running") return "CI running";
+  if (ci.status == "failed") return "Checks failed";
+  if (ci.status == "passed") return "Checks passed";
+  return "Checks cancelled";
+}
+
 // CI checks on the pull request for the session open in the Claude app: one ring segment per
 // check, filling clockwise as they pass. Running checks pulse; queued ones stay dark.
 static void drawCI(const CI &ci) {
@@ -828,8 +840,7 @@ static void drawCI(const CI &ci) {
   } else {  // cancelled
     frame.drawWedgeLine(CX - 8, 56, CX + 8, 56, 2.5, 2.5, COL_BG);
   }
-  text(running ? "CI running" : red ? "Checks failed" : green ? "Checks passed" : "Checks cancelled", CX, 96, COL_TEXT,
-       &fonts::FreeSansBold12pt7b);
+  text(ciHeadline(ci), CX, 96, COL_TEXT, &fonts::FreeSansBold12pt7b);
 
   frame.setFont(&fonts::FreeSans9pt7b);
   text(fit(ci.title, 176), CX, 124, COL_DIM, &fonts::FreeSans9pt7b);
@@ -1221,6 +1232,78 @@ static Pick pickCard(bool stale, bool alertFirst) {
   return p;
 }
 
+// The card loop() shows, for the Mac. It may be under the five-tap diagnostics, or dark at night.
+static Pick currentCard() {
+  bool stale = st.valid && millis() - st.rxMillis > STALE_MS;
+  return pickCard(stale, nightActive(nightMode, time(nullptr)) && nightMode.alerts);
+}
+
+// Identifies the card, so the Mac only dismisses the one it last heard was on screen; "" for none
+static String cardKey(const Pick &card) {
+  if (card.alert) return "alert" + sessionKey(*card.alert);
+  if (card.ci) return "ci;" + st.ci.key;
+  if (card.done) return "done" + sessionKey(*card.done);
+  return "";
+}
+
+// Hides the card until something new happens
+static void dismissCard(const Pick &card) {
+  if (card.alert) dismissedWaiting = stateKey("waiting");
+  else if (card.ci) dismissedCI = st.ci.key;
+  else if (card.done) dismissedDone = stateKey("done");
+}
+
+// Answers the Mac with the card on screen, so its menu bar app can offer to dismiss it: "card" is
+// null for the status screen. "icon" is the symbol in the circle at the top of the card.
+static void replyWithCard(JsonDocument &reply) {
+  Pick card = currentCard();
+  String key = cardKey(card);
+  if (key.length()) {
+    JsonObject c = reply["card"].to<JsonObject>();
+    c["key"] = key;
+    if (card.alert) {
+      c["icon"] = card.alert->kind == "question" ? "question" : "exclamation";
+      c["title"] = headline(card.alert->kind);
+      c["name"] = card.alert->name;
+    } else if (card.ci) {
+      c["icon"] = st.ci.status == "running" ? "spinner" : st.ci.status == "failed" ? "cross"
+                : st.ci.status == "passed"  ? "check"   : "dash";
+      c["title"] = ciHeadline(st.ci);
+      c["name"] = st.ci.title;
+    } else {
+      c["icon"] = "check";
+      c["title"] = "Done";
+      c["name"] = card.done->name;
+    }
+  } else {
+    reply["card"] = nullptr;
+  }
+  String out;
+  serializeJson(reply, out);
+  server.send(200, "application/json", out);
+}
+
+// Dismiss in the Mac's menu bar app: like a double tap, but with {"key": ...} only if that card is
+// still on screen, so one that's changed since the Mac last heard isn't dismissed by mistake
+static void handleDismiss() {
+  JsonDocument body;
+  String raw = server.arg("plain");
+  if (raw.length() && deserializeJson(body, raw)) {
+    server.send(400, "text/plain", "bad json");
+    return;
+  }
+  Pick card = currentCard();
+  String key = cardKey(card);
+  bool dismiss = key.length() && (body["key"].isNull() || key == (const char *)(body["key"] | ""));
+  if (dismiss) {
+    dismissCard(card);
+    Serial.println("Card dismissed from the Mac");
+  }
+  JsonDocument reply;
+  reply["dismissed"] = dismiss;
+  replyWithCard(reply);
+}
+
 // ---- Setup / loop ----
 
 static bool checkPowerCycleReset();
@@ -1316,6 +1399,7 @@ void setup() {
   server.on("/state", HTTP_POST, handleState);
   server.on("/", HTTP_GET, handleRoot);
   server.on("/screen.bmp", HTTP_GET, handleScreenshot);
+  server.on("/dismiss", HTTP_POST, handleDismiss);
   server.on("/wifi/reset", HTTP_POST, handleWifiReset);
   server.on("/brightness", handleBrightness);
 #ifdef BOARD_LILYGO_T_RGB
@@ -1483,9 +1567,7 @@ void loop() {
   }
 
   if (dismiss && !diagnosticsSince) {
-    if (card.alert) dismissedWaiting = stateKey("waiting");
-    else if (card.ci) dismissedCI = st.ci.key;
-    else if (card.done) dismissedDone = stateKey("done");
+    dismissCard(card);
     card = pickCard(stale, alertFirst);
   }
 
