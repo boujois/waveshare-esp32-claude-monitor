@@ -81,7 +81,7 @@ You change the options from a small [menu bar app](#the-menu-bar-app) on your Ma
 
 | | |
 |---|---|
-| 🖥️ **The display** | [Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28): an ESP32-S3 with a 1.28" 240×240 round screen (GC9A01). The version with the CNC metal case ("-B") looks great on a desk. Get the **non-touch** version; the touch version uses different pins. |
+| 🖥️ **The display** | [Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28): an ESP32-S3 with a 1.28" 240×240 round screen (GC9A01). The version with the CNC metal case ("-B") looks great on a desk. Get the **non-touch** version; the touch version uses different pins. Or a [LilyGO T-RGB](#using-a-lilygo-t-rgb), a bigger 480×480 round screen. |
 | 🔌 **A USB-C cable** | For flashing, and for power afterwards. Once it's set up, any USB phone charger will do. |
 | 🍎 **A Mac** | Running Claude Code. The helper uses `launchd` and the macOS Keychain, and the [menu bar app](#the-menu-bar-app) needs macOS 13 or later. |
 | 📶 **2.4 GHz Wi-Fi** | The ESP32 can't join 5 GHz-only networks. |
@@ -400,13 +400,9 @@ The installer puts the app in `~/Applications` and starts it when you log in. **
 
 The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. The T-RGB has no motion sensor, so the case taps are **taps on the screen** instead: double-tap the screen to dismiss a card, or tap it 5 times for diagnostics. The **BOOT** button works as described above.
 
-1. Flash it over USB from source (the published installer and release files are for the Waveshare board):
-   ```bash
-   cd claude-status/firmware
-   pio run -e lilygo-t-rgb -t upload
-   ```
-   If the upload can't find the board, hold **BOOT**, tap **RST**, release **BOOT**, and run it again.
-2. Set up Wi-Fi from your phone and install the Mac helper exactly as for the Waveshare board (Option 2 step 3, or Option 3 step 4). Skip the firmware installer.
+It installs and updates like the Waveshare: the one-line installer, `Install.command` and the [installer page](https://boujois.github.io/waveshare-esp32-claude-monitor/) all put the right software on it (the installers tell the boards apart by their memory; on the page, pick **LilyGO T-RGB**), and the menu bar app's **Update** button updates it over Wi-Fi with the T-RGB build from each release.
+
+To build it yourself instead: `cd claude-status/firmware && pio run -e lilygo-t-rgb -t upload`. If the upload can't find the board, hold **BOOT**, tap **RST**, release **BOOT**, and run it again. A build from source reports version `dev`, so the menu bar app doesn't offer it updates until you install a release.
 
 Some T-RGB panels show mixed colours too blue, so the T-RGB build turns blue and green down a little (white balance red 100%, green 90%, blue 70%). Adjust it live from your Mac, and it's saved on the display:
 ```bash
@@ -420,7 +416,7 @@ To change how bright the normal screens are (alerts are always full brightness),
 
 The screen type is detected from the touch controller at start-up, but the newer revision of the 2.1" board (V2) can't be told apart from the original, so it gets the original's settings. If the screen is blank, tinted or the colours look wrong, force the type by adding e.g. `-DTRGB_PANEL=LILYGO_T_RGB_2_8_INCHES` (or `LILYGO_T_RGB_2_1_INCHES_FULL_CIRCLE`, `…_HALF_CIRCLE`, `…_FULL_CIRCLE_V2`, `…_HALF_CIRCLE_V2`) to `build_flags` in the `lilygo-t-rgb` environment.
 
-Wi-Fi firmware updates from the Mac helper download the Waveshare release, so a T-RGB refuses them (`/info` reports `"board": "lilygo-t-rgb"`) and the updater reports that the update failed. To update a T-RGB, pull the repo and flash it over USB again. A T-RGB built from source reports version `dev`, so the menu bar app doesn't offer it updates. The panel driver in `claude-status/firmware/src/trgb/` is LilyGO's, under its MIT licence.
+Each board only accepts Wi-Fi updates built for it (`/info` reports which board it is), so one can't be sent the other's software by mistake. The panel driver in `claude-status/firmware/src/trgb/` is LilyGO's, under its MIT licence.
 
 ---
 
