@@ -1,4 +1,5 @@
-// Claude Code status display for the Waveshare ESP32-S3-LCD-1.28.
+// Claude Code status display for the Waveshare ESP32-S3-LCD-1.28 or the LilyGO T-RGB
+// (build with -e lilygo-t-rgb, see platformio.ini).
 //
 // The Mac bridge (../bridge) POSTs a JSON summary to http://claude-status.local/state.
 // When a session needs input the screen shows a full-screen alert; otherwise it shows
@@ -37,6 +38,7 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include <utility>
 #include <vector>
 
 #include "cat.h"
@@ -59,6 +61,8 @@ constexpr uint32_t POWER_CYCLE_WINDOW_MS = 10000;             // each within thi
 constexpr uint32_t STALE_MS = 30000;                          // no push for this long = Mac offline
 constexpr float TAP_G = 0.25f;                                // how firm each tap on the case must be, in g
 constexpr uint32_t DIAGNOSTICS_MS = 30000;                    // five quick taps show diagnostics this long
+
+#ifndef BOARD_LILYGO_T_RGB
 
 // ---- Board pins (Waveshare wiki, non-touch version) ----
 constexpr int PIN_LCD_DC   = 8;
@@ -120,6 +124,198 @@ class LGFX : public lgfx::LGFX_Device {
 
 static LGFX lcd;
 static LGFX_Sprite frame(&lcd);
+
+constexpr const char *BOARD_NAME = "waveshare-s3-lcd128";
+static void showFrame() { frame.pushSprite(0, 0); }
+
+#else  // BOARD_LILYGO_T_RGB
+
+#include <esp_heap_caps.h>
+#include "trgb/LilyGo_RGBPanel.h"
+
+constexpr int PIN_BOOT = 0;
+
+// The T-RGB has a 480x480 ST7701S panel on the ESP32-S3's RGB interface; LilyGO's driver
+// (src/trgb, MIT) sets it up through the XL9555 I/O expander and picks the right init
+// sequence for the 2.1" or 2.8" board from the touch controller it finds. The UI is still
+// drawn into the 240x240 sprite and scaled up 2x with smoothing on the way to the panel.
+// To force a panel type, build with e.g. -DTRGB_PANEL=LILYGO_T_RGB_2_8_INCHES.
+#ifndef TRGB_WB_R  // starting white balance, in percent; adjust live with POST /whitebalance
+#define TRGB_WB_R 100
+#endif
+#ifndef TRGB_WB_G
+#define TRGB_WB_G 90
+#endif
+#ifndef TRGB_WB_B
+#define TRGB_WB_B 70
+#endif
+
+class TRGBDisplay {
+  LilyGo_RGBPanel panel;
+  static constexpr int OUT = 480, BAND = 16;  // output rows per transfer
+  uint16_t *band = nullptr;
+
+  // White balance: per-channel gains in percent, applied to every pixel through small lookup
+  // tables. This panel shows mixed colours too blue, so blue (and a little green) is turned down.
+  uint8_t wb[3] = {TRGB_WB_R, TRGB_WB_G, TRGB_WB_B};
+  uint16_t lutR[32], lutG[64], lutB[32];
+  uint16_t rows[2][240];
+  inline uint16_t balance(uint16_t v) const { return lutR[v >> 11] | lutG[(v >> 5) & 63] | lutB[v & 31]; }
+
+  // Exact (floor) average of two RGB565 pixels.
+  static inline uint16_t avg(uint16_t a, uint16_t b) { return (a & b) + (((a ^ b) & 0xF7DE) >> 1); }
+
+ public:
+  void init() {
+#ifdef TRGB_BGR
+    constexpr LilyGo_RGBPanel_Color_Order order = LILYGO_T_RGB_ORDER_BGR;
+#else
+    constexpr LilyGo_RGBPanel_Color_Order order = LILYGO_T_RGB_ORDER_RGB;
+#endif
+#ifdef TRGB_PANEL
+    bool ok = panel.begin(TRGB_PANEL, order);
+#else
+    bool ok = panel.begin(order);
+#endif
+    if (!ok) Serial.println("T-RGB panel init failed");
+    setWhiteBalance(wb[0], wb[1], wb[2]);
+    Serial.printf("T-RGB: touch %s, model %d\n", panel.getTouchModelName(), (int)panel.getModel());
+    band = (uint16_t *)heap_caps_malloc(OUT * BAND * 2, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!band) band = (uint16_t *)heap_caps_malloc(OUT * BAND * 2, MALLOC_CAP_SPIRAM);
+  }
+
+  void setWhiteBalance(int r, int g, int b) {
+    wb[0] = constrain(r, 0, 100);
+    wb[1] = constrain(g, 0, 100);
+    wb[2] = constrain(b, 0, 100);
+    for (int i = 0; i < 32; i++) {
+      lutR[i] = ((i * wb[0] + 50) / 100) << 11;
+      lutB[i] = (i * wb[2] + 50) / 100;
+    }
+    for (int i = 0; i < 64; i++) lutG[i] = ((i * wb[1] + 50) / 100) << 5;
+  }
+  const uint8_t *whiteBalance() const { return wb; }
+
+  const char *touchName() { return panel.getTouchModelName(); }
+  bool touched() {
+    int16_t x, y;
+    return panel.getPoint(&x, &y, 1) > 0;
+  }
+  int model() { return (int)panel.getModel(); }
+
+  // Diagnostic (build with -DTRGB_TEST_PATTERN): six colour stripes. The left half is written
+  // straight to the panel as plain RGB565; the right half goes through the sprite like the UI.
+  void testPattern(LGFX_Sprite &spr) {
+    static const uint32_t cols[6] = {0xFF0000, 0x00FF00, 0x0000FF, 0xFFFFFF, 0xA6AEBF, 0x0B0F1A};
+    for (int i = 0; i < 6; i++) spr.fillRect(0, i * 40, 240, 40, cols[i]);
+    spr.setTextDatum(textdatum_t::middle_center);
+    spr.setFont(&fonts::Font2);
+    spr.setTextColor(0xFFFFFF);
+    spr.drawString(String("touch ") + touchName() + "  model " + String(model()), 180, 220);
+    present(spr);
+    if (!band) return;
+    for (int i = 0; i < 6; i++) {
+      uint32_t c = cols[i];
+      uint16_t v = ((c >> 8) & 0xF800) | ((c >> 5) & 0x07E0) | ((c & 0xFF) >> 3);  // RGB888 -> RGB565
+      for (int k = 0; k < 240 * BAND; k++) band[k] = v;
+      for (int y = i * 80; y < (i + 1) * 80; y += BAND) panel.pushColors(0, y, 240, y + BAND, band);
+    }
+  }
+
+  // 0-255, like LovyanGFX; the T-RGB backlight driver has 16 steps.
+  void setBrightness(uint8_t v) { panel.setBrightness(v ? max(1, (v * 16 + 127) / 255) : 0); }
+
+  void fillScreen(uint32_t) {  // only ever used to clear to black at start-up
+    if (!band) return;
+    memset(band, 0, OUT * BAND * 2);
+    for (int y = 0; y < OUT; y += BAND) panel.pushColors(0, y, OUT, y + BAND, band);
+  }
+
+  // Scales a 240x240 16-bit sprite to the full panel. Each source pixel becomes a 2x2 block
+  // of itself and its averages with the neighbours to the right and below.
+  void present(LGFX_Sprite &spr) {
+    const uint16_t *src = (const uint16_t *)spr.getBuffer();
+    if (!src || !band) return;
+    const int W = spr.width(), H = spr.height();  // 240 x 240
+    if (W > 240) return;
+    // LovyanGFX keeps 16-bit sprites byte-swapped; the RGB panel wants native order.
+    auto load = [&](int y, uint16_t *out) {
+      const uint16_t *in = src + y * W;
+      for (int x = 0; x < W; x++) out[x] = balance(__builtin_bswap16(in[x]));
+    };
+    uint16_t *r0 = rows[0], *r1 = rows[1];
+    load(0, r0);
+    int row = 0;
+    for (int y = 0; y < H; y++) {
+      load(y + 1 < H ? y + 1 : y, r1);
+      uint16_t *o0 = band + row * OUT, *o1 = o0 + OUT;
+      for (int x = 0; x < W; x++) {
+        int xn = x + 1 < W ? x + 1 : x;
+        uint16_t a = r0[x], b = r0[xn], c = r1[x], d = r1[xn];
+        uint16_t ab = avg(a, b), ac = avg(a, c);
+        o0[2 * x] = a;
+        o0[2 * x + 1] = ab;
+        o1[2 * x] = ac;
+        o1[2 * x + 1] = avg(ab, avg(c, d));
+      }
+      std::swap(r0, r1);
+      row += 2;
+      if (row == BAND) {
+        int oy = 2 * y + 2 - BAND;
+        panel.pushColors(0, oy, OUT, oy + BAND, band);
+        row = 0;
+      }
+    }
+  }
+};
+
+static TRGBDisplay lcd;
+static LGFX_Sprite frame;
+
+constexpr const char *BOARD_NAME = "lilygo-t-rgb";
+static void showFrame() { lcd.present(frame); }
+
+// ---- Taps (taps.h) from the touch screen ----
+// The T-RGB has no motion sensor, so the gestures that are taps on the Waveshare's case are taps
+// on the screen here: a run of touches 60-450 ms apart; exactly two is a double tap (counted once
+// the run is over), and the fifth touch of a run counts as five taps straight away.
+namespace touchtaps {
+constexpr uint32_t POLL_MS = 10, GAP_MIN = 60, GAP_MAX = 450;
+volatile uint32_t doubles = 0, fives = 0;
+
+void watch(void *) {
+  bool wasDown = false;
+  uint32_t lastTap = 0, run = 0;
+  for (;;) {
+    uint32_t now = millis();
+    bool down = lcd.touched();
+    if (down && !wasDown && (run == 0 || now - lastTap >= GAP_MIN)) {
+      run = (run && now - lastTap <= GAP_MAX) ? run + 1 : 1;
+      lastTap = now;
+      if (run == 5) fives = fives + 1;
+    }
+    wasDown = down;
+    if (run && now - lastTap > GAP_MAX) {
+      if (run == 2) doubles = doubles + 1;
+      run = 0;
+    }
+    vTaskDelay(pdMS_TO_TICKS(POLL_MS));
+  }
+}
+}  // namespace touchtaps
+
+bool tapsBegin(float) {
+  return xTaskCreatePinnedToCore(touchtaps::watch, "touchtaps", 4096, nullptr, 5, nullptr, 0) == pdPASS;
+}
+uint32_t doubleTapCount() { return touchtaps::doubles; }
+uint32_t fiveTapCount() { return touchtaps::fives; }
+
+// Firmware for other boards would boot but drive the wrong screen, so Wi-Fi updates only
+// accept images that carry this tag (every T-RGB build does, via this very string).
+static const char OTA_BOARD_TAG[] = "claude-monitor-board=lilygo-t-rgb;";
+#define REQUIRE_OTA_BOARD_TAG 1
+
+#endif  // BOARD_LILYGO_T_RGB
 static WebServer server(80);
 
 constexpr int CX = 120, CY = 120;
@@ -178,6 +374,13 @@ static String dismissedCI;                      // the CI card's key when you la
 static bool tapReady = false;                   // the motion sensor was found, so taps on the case work
 static WiFiManager wifiManager;
 static Preferences prefs;
+#ifdef BOARD_LILYGO_T_RGB
+constexpr uint8_t DEFAULT_BRIGHTNESS = 204;  // 80%: the T-RGB's backlight is dimmer
+#else
+constexpr uint8_t DEFAULT_BRIGHTNESS = 150;
+#endif
+static int idleBrightness = DEFAULT_BRIGHTNESS;  // normal screens; alerts are always full brightness
+
 static String currentTz;
 static uint8_t powerCycles = 0;  // consecutive quick power-ons, for the no-button Wi-Fi reset
 static String pairKey;           // shared with the Mac helper; required for firmware updates
@@ -310,6 +513,36 @@ static void handleState() {
   JsonDocument reply;
   reply["ok"] = true;
   replyWithCard(reply);
+}
+
+#ifdef BOARD_LILYGO_T_RGB
+// GET shows the white balance; POST /whitebalance?r=100&g=90&b=70 (percent) changes and saves it.
+static void handleWhiteBalance() {
+  if (server.method() == HTTP_POST) {
+    const uint8_t *cur = lcd.whiteBalance();
+    int r = server.hasArg("r") ? server.arg("r").toInt() : cur[0];
+    int g = server.hasArg("g") ? server.arg("g").toInt() : cur[1];
+    int b = server.hasArg("b") ? server.arg("b").toInt() : cur[2];
+    lcd.setWhiteBalance(r, g, b);
+    const uint8_t *wb = lcd.whiteBalance();
+    prefs.putUChar("wbR", wb[0]);
+    prefs.putUChar("wbG", wb[1]);
+    prefs.putUChar("wbB", wb[2]);
+  }
+  const uint8_t *wb = lcd.whiteBalance();
+  server.send(200, "text/plain", "white balance r=" + String(wb[0]) + " g=" + String(wb[1]) + " b=" + String(wb[2]) + "\n");
+}
+#endif
+
+// GET shows the brightness of the normal screens (alerts are always full); POST /brightness?level=80
+// (percent) changes and saves it.
+static void handleBrightness() {
+  if (server.method() == HTTP_POST && server.hasArg("level")) {
+    int pct = constrain(server.arg("level").toInt(), 5, 100);
+    idleBrightness = (pct * 255 + 50) / 100;
+    prefs.putUChar("bright", idleBrightness);
+  }
+  server.send(200, "text/plain", "brightness " + String((idleBrightness * 100 + 127) / 255) + "%\n");
 }
 
 static void handleWifiReset() {
@@ -829,7 +1062,7 @@ static void drawMessage(const char *title, const String &line, uint32_t ring) {
   frame.fillArc(CX, CY, 112, 119, 0, 360, ring);
   text(title, CX, 108, COL_TEXT, &fonts::FreeSansBold9pt7b);
   text(line, CX, 134, COL_DIM, &fonts::Font2);
-  frame.pushSprite(0, 0);
+  showFrame();
 }
 
 // ---- Pairing and firmware updates over Wi-Fi ----
@@ -841,6 +1074,7 @@ static bool authorized() {
 static void handleInfo() {
   JsonDocument d;
   d["version"] = FW_VERSION;
+  d["board"] = BOARD_NAME;
   d["paired"] = pairKey.length() > 0;
   d["ip"] = WiFi.localIP().toString();
   JsonObject n = d["night"].to<JsonObject>();
@@ -881,11 +1115,26 @@ static void drawUpdateProgress(int pct) {
   text("Updating", CX, 100, COL_TEXT, &fonts::FreeSansBold12pt7b);
   text(String(pct) + "%", CX, 128, COL_DIM, &fonts::FreeSansBold9pt7b);
   text("Don't unplug the display", CX, 156, COL_FAINT, &fonts::Font2);
-  frame.pushSprite(0, 0);
+  showFrame();
 }
 
 static bool otaAuthed = false, otaOk = false;
 static size_t otaTotal = 0;
+static String otaError;
+
+#ifdef REQUIRE_OTA_BOARD_TAG
+// Looks for OTA_BOARD_TAG anywhere in the incoming image, including across chunk boundaries.
+static size_t otaTagMatched = 0;
+static bool otaTagFound = false;
+static void scanForBoardTag(const uint8_t *buf, size_t len) {
+  const size_t n = sizeof(OTA_BOARD_TAG) - 1;
+  for (size_t i = 0; i < len && !otaTagFound; i++) {
+    char ch = (char)buf[i];
+    while (otaTagMatched && ch != OTA_BOARD_TAG[otaTagMatched]) otaTagMatched = 0;  // tag has no repeated prefix
+    if (ch == OTA_BOARD_TAG[otaTagMatched] && ++otaTagMatched == n) otaTagFound = true;
+  }
+}
+#endif
 
 // Called repeatedly while the firmware file streams in
 static void handleUpdateUpload() {
@@ -893,6 +1142,11 @@ static void handleUpdateUpload() {
   if (up.status == UPLOAD_FILE_START) {
     otaAuthed = authorized();
     otaOk = false;
+    otaError = "";
+#ifdef REQUIRE_OTA_BOARD_TAG
+    otaTagMatched = 0;
+    otaTagFound = false;
+#endif
     if (!otaAuthed) return;
     otaTotal = server.header("X-Firmware-Size").toInt();
     drawUpdateProgress(0);
@@ -900,6 +1154,9 @@ static void handleUpdateUpload() {
     otaOk = Update.begin(otaTotal ? otaTotal : UPDATE_SIZE_UNKNOWN);
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (!otaAuthed || !otaOk) return;
+#ifdef REQUIRE_OTA_BOARD_TAG
+    scanForBoardTag(up.buf, up.currentSize);
+#endif
     if (Update.write(up.buf, up.currentSize) != up.currentSize) otaOk = false;
     static uint32_t lastDraw = 0;
     if (otaTotal && millis() - lastDraw > 250) {
@@ -907,6 +1164,13 @@ static void handleUpdateUpload() {
       drawUpdateProgress(min(99, (int)(100.0 * up.totalSize / otaTotal)));
     }
   } else if (up.status == UPLOAD_FILE_END) {
+#ifdef REQUIRE_OTA_BOARD_TAG
+    if (otaAuthed && otaOk && !otaTagFound) {
+      Update.abort();
+      otaOk = false;
+      otaError = String("this firmware isn't built for the ") + BOARD_NAME;
+    }
+#endif
     if (otaAuthed && otaOk) otaOk = Update.end(true);
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     Update.abort();
@@ -920,7 +1184,8 @@ static void handleUpdateDone() {
     return;
   }
   if (!otaOk) {
-    server.send(500, "text/plain", String("Update failed: ") + Update.errorString() + "\n");
+    server.send(500, "text/plain",
+                String("Update failed: ") + (otaError.length() ? otaError : String(Update.errorString())) + "\n");
     drawMessage("Update failed", "Still on " FW_VERSION, COL_ERR);
     delay(2000);
     return;
@@ -1049,7 +1314,7 @@ static void catWalk() {
   while (true) {
     frame.fillScreen(COL_BG);
     if (!drawCatWalk(frame, millis() - start)) break;
-    frame.pushSprite(0, 0);
+    showFrame();
     delay(10);
   }
 }
@@ -1066,11 +1331,27 @@ void setup() {
     Serial.println("Sprite allocation failed");
     while (true) delay(1000);
   }
+#if defined(BOARD_LILYGO_T_RGB) && defined(TRGB_TEST_PATTERN)
+  lcd.setBrightness(255);
+  lcd.testPattern(frame);
+  for (int i = 0; i < 60; i++) {  // keep it up for a minute, repeating the log line for late monitors
+    Serial.printf("T-RGB: touch %s, model %d\n", lcd.touchName(), lcd.model());
+    delay(1000);
+  }
+#endif
 
   tapReady = tapsBegin(TAP_G);
+#ifdef BOARD_LILYGO_T_RGB
+  Serial.println(tapReady ? "Taps on the touch screen work" : "Couldn't start watching the touch screen");
+#else
   Serial.println(tapReady ? "Motion sensor found: taps on the case work" : "No motion sensor: taps on the case don't work");
+#endif
 
   prefs.begin("claude-status", false);
+  idleBrightness = prefs.getUChar("bright", DEFAULT_BRIGHTNESS);
+#ifdef BOARD_LILYGO_T_RGB
+  lcd.setWhiteBalance(prefs.getUChar("wbR", TRGB_WB_R), prefs.getUChar("wbG", TRGB_WB_G), prefs.getUChar("wbB", TRGB_WB_B));
+#endif
   pairKey = prefs.getString("key", "");
   showCat = prefs.getBool("cat", true);
   nightMode.enabled = prefs.getBool("night", nightMode.enabled);
@@ -1095,6 +1376,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(HOSTNAME);
   WiFi.setAutoReconnect(true);
+  WiFi.setSleep(false);  // Wi-Fi power saving makes the display miss pushes and mDNS queries
 #ifdef WIFI_SSID
   if (!wifiManager.getWiFiIsSaved()) WiFi.begin(WIFI_SSID, WIFI_PASS);  // development builds only
 #endif
@@ -1119,6 +1401,10 @@ void setup() {
   server.on("/screen.bmp", HTTP_GET, handleScreenshot);
   server.on("/dismiss", HTTP_POST, handleDismiss);
   server.on("/wifi/reset", HTTP_POST, handleWifiReset);
+  server.on("/brightness", handleBrightness);
+#ifdef BOARD_LILYGO_T_RGB
+  server.on("/whitebalance", handleWhiteBalance);
+#endif
   server.on("/info", HTTP_GET, handleInfo);
   server.on("/pair", HTTP_POST, handlePair);
   server.on("/update", HTTP_POST, handleUpdateDone, handleUpdateUpload);
@@ -1202,7 +1488,7 @@ void loop() {
       if (!handleBootButton() && millis() - drawnAt >= 100) {
         drawnAt = millis();
         drawWifiSetup();
-        frame.pushSprite(0, 0);
+        showFrame();
       }
       delay(2);
       return;
@@ -1214,10 +1500,24 @@ void loop() {
     Serial.println("Wi-Fi connected, IP " + WiFi.localIP().toString());
     if (!serverStarted) {  // the setup portal uses port 80 too, so start ours once it's closed
       server.begin();
-      if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
-      Serial.printf("mDNS: %s.local\n", HOSTNAME);
       serverStarted = true;
     }
+    // (Re)announce the name after every (re)connect: mDNS stops answering after a Wi-Fi drop
+    // otherwise, and the Mac can't find the display any more.
+    MDNS.end();
+    if (MDNS.begin(HOSTNAME)) MDNS.addService("http", "tcp", 80);
+    Serial.printf("mDNS: %s.local\n", HOSTNAME);
+  }
+  // Auto-reconnect occasionally gives up after a long outage; nudge it once a minute.
+  static uint32_t offlineSince = 0;
+  if (connected || !serverStarted) {
+    offlineSince = 0;
+  } else if (!offlineSince) {
+    offlineSince = millis() | 1;
+  } else if (millis() - offlineSince > 60000) {
+    Serial.println("Wi-Fi still down, reconnecting");
+    WiFi.reconnect();
+    offlineSince = millis() | 1;
   }
   wasConnected = connected;
 
@@ -1234,6 +1534,7 @@ void loop() {
   // closes them, or otherwise dismisses the card on screen
   static uint32_t doubles = 0, fives = 0, diagnosticsSince = 0;
   uint32_t d = doubleTapCount(), f = fiveTapCount();
+
   bool dismiss = pressed || d != doubles;
   if (f != fives) {
     diagnosticsSince = millis() | 1;
@@ -1275,9 +1576,10 @@ void loop() {
   else if (card.ci) drawCI(st.ci);
   else if (card.done) drawDone(*card.done, st.done - 1);
   else drawStatus(stale);
-  frame.pushSprite(0, 0);
+  showFrame();
 
-  setBacklight(backlight(nightMode, night, diagnosticsSince, peekSince, card.alert));
+  int level = backlight(nightMode, night, diagnosticsSince, peekSince, card.alert);
+  setBacklight(level == BRIGHTNESS ? idleBrightness : level);  // normal brightness is adjustable (/brightness)
   // When the screen last went dark or lit, for judging taps. Diagnostics are left out: a tap that
   // comes just after they close is judged by the screen underneath.
   bool nowDark = nightDark(nightMode, night, false, peekSince, card.alert);
