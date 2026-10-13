@@ -81,7 +81,7 @@ You change the options from a small [menu bar app](#the-menu-bar-app) on your Ma
 
 | | |
 |---|---|
-| 🖥️ **The display** | [Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28): an ESP32-S3 with a 1.28" 240×240 round screen (GC9A01). The version with the CNC metal case ("-B") looks great on a desk. Get the **non-touch** version; the touch version uses different pins. |
+| 🖥️ **The display** | [Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28): an ESP32-S3 with a 1.28" 240×240 round screen (GC9A01). The version with the CNC metal case ("-B") looks great on a desk. Both the non-touch and the touch version (ESP32-S3-Touch-LCD-1.28) work. The installer and releases are for the non-touch version; for the touch version, build with `pio run -e waveshare-s3-touch-lcd128 -t upload` (see [Option 3](#option-3-build-it-yourself-step-by-step)). |
 | 🔌 **A USB-C cable** | For flashing, and for power afterwards. Once it's set up, any USB phone charger will do. |
 | 🍎 **A Mac** | Running Claude Code. The helper uses `launchd` and the macOS Keychain, and the [menu bar app](#the-menu-bar-app) needs macOS 13 or later. |
 | 📶 **2.4 GHz Wi-Fi** | The ESP32 can't join 5 GHz-only networks. |
@@ -725,7 +725,7 @@ Click **Start helper**. If it doesn't start, **Open Log** shows why, and running
 <summary><b>Colours look wrong, or the screen is blank</b></summary>
 
 - **Inverted colours** (white background): flip `cfg.invert` in the `LGFX` class in `main.cpp`.
-- **Blank screen:** double-check you have the **non-touch** ESP32-S3-LCD-1.28. The touch version uses different reset and backlight pins (RST 14, BL 2).
+- **Blank screen:** you may have the **touch** version (ESP32-S3-Touch-LCD-1.28), which uses different reset and backlight pins (RST 14, BL 2). Build it with `pio run -e waveshare-s3-touch-lcd128 -t upload`.
 </details>
 
 <details>

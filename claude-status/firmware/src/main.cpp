@@ -64,13 +64,20 @@ constexpr uint32_t DIAGNOSTICS_MS = 30000;                    // five quick taps
 
 #ifndef BOARD_LILYGO_T_RGB
 
-// ---- Board pins (Waveshare wiki, non-touch version) ----
+// ---- Board pins (Waveshare wiki) ----
+// The touch version (ESP32-S3-Touch-LCD-1.28, build with -e waveshare-s3-touch-lcd128) moves only
+// the LCD reset and backlight pins; the SPI bus, DC, CS and BOOT are the same.
 constexpr int PIN_LCD_DC   = 8;
 constexpr int PIN_LCD_CS   = 9;
 constexpr int PIN_LCD_SCLK = 10;
 constexpr int PIN_LCD_MOSI = 11;
+#ifdef BOARD_WAVESHARE_TOUCH
+constexpr int PIN_LCD_RST  = 14;
+constexpr int PIN_LCD_BL   = 2;
+#else
 constexpr int PIN_LCD_RST  = 12;
 constexpr int PIN_LCD_BL   = 40;
+#endif
 constexpr int PIN_BOOT     = 0;
 
 class LGFX : public lgfx::LGFX_Device {
@@ -125,7 +132,15 @@ class LGFX : public lgfx::LGFX_Device {
 static LGFX lcd;
 static LGFX_Sprite frame(&lcd);
 
+#ifdef BOARD_WAVESHARE_TOUCH
+constexpr const char *BOARD_NAME = "waveshare-s3-touch-lcd128";
+// The non-touch image boots on this board but leaves the backlight off, so Wi-Fi updates only
+// accept images built for the touch version (they all carry this string)
+static const char OTA_BOARD_TAG[] = "claude-monitor-board=waveshare-s3-touch-lcd128;";
+#define REQUIRE_OTA_BOARD_TAG 1
+#else
 constexpr const char *BOARD_NAME = "waveshare-s3-lcd128";
+#endif
 static void showFrame() { frame.pushSprite(0, 0); }
 
 #else  // BOARD_LILYGO_T_RGB
