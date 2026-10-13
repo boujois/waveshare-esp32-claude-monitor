@@ -40,6 +40,10 @@ jobs:
       - name: Build release files
         run: tools/build-release.sh "${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}"
 
+      # A check only: release files are for the Waveshare board
+      - name: Build LilyGO T-RGB firmware
+        run: cd claude-status/firmware && pio run -e lilygo-t-rgb
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-files
