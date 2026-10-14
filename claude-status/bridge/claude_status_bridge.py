@@ -562,17 +562,24 @@ def app_bundle(path):
     return path[:i + 4] if i >= 0 else None
 
 
+def _host_app(bundle):
+    """The bundle, unless it's Claude Code's own: the claude CLI can live in a bundle of its own
+    (".../claude.app/Contents/MacOS/claude"), which isn't where the session is shown."""
+    return bundle if bundle and os.path.basename(bundle) != "claude.app" else None
+
+
 def find_app(pid):
-    """The app a process runs in: the bundle of its nearest ancestor that's in one. ps names most
-    executables by their full path; for any it doesn't, the command line tells."""
-    chain = process_chain(pid)
+    """The app a session runs in: the bundle of the nearest of its parent processes that's in one
+    (not the session's own process, which is Claude Code). ps names most executables by their full
+    path; for any it doesn't, the command line tells."""
+    chain = process_chain(pid)[1:]
     for _, exe in chain:
-        bundle = app_bundle(exe)
+        bundle = _host_app(app_bundle(exe))
         if bundle:
             return bundle
     for ancestor, _ in chain:
         try:
-            bundle = app_bundle(_run(["ps", "-o", "args=", "-p", str(ancestor)], timeout=5).stdout.strip())
+            bundle = _host_app(app_bundle(_run(["ps", "-o", "args=", "-p", str(ancestor)], timeout=5).stdout.strip()))
         except (OSError, subprocess.SubprocessError):
             break
         if bundle:
@@ -604,7 +611,8 @@ def _open_session(short_id):
         return None
     bundle = find_app(pid)
     if not bundle:
-        log(f"open: {short_id} isn't running in an app (tmux or ssh?)")
+        log(f"open: {short_id} isn't running in an app (tmux or ssh?):",
+            " < ".join(exe for _, exe in process_chain(pid)[:8]))
         return None
     name, cwd = os.path.basename(bundle), d.get("cwd")
     script = TERMINAL_SCRIPTS.get(name)
@@ -618,7 +626,7 @@ def _open_session(short_id):
         _run(["open", "-a", bundle, cwd])
     else:
         _run(["open", bundle])
-    log(f"opened {short_id} in {name[:-4]}")
+    log(f"opened {short_id} in {name[:-4]} ({bundle})")
     return name[:-4]
 
 
