@@ -502,7 +502,7 @@ To answer an alert, you need the session that's asking. **Open** in the [menu ba
 
 - **Terminal or iTerm2:** the app comes forward on the tab running that session. The first time, macOS asks whether the Claude Monitor helper (python3) may control the app: click **OK**.
 - **VS Code, Cursor, Windsurf:** the window with that session's folder comes forward.
-- **The Claude app** (its Code tab, or a chat): the app comes forward.
+- **The Claude app's Code tab:** the app comes forward on that session. **A chat in the Claude app:** the app comes forward.
 - **Anything else:** the app it runs in comes forward. Sessions in `tmux` or over `ssh` aren't in an app, so nothing opens.
 
 The T-RGB shows *Opening on your Mac* when you tap. The Waveshare boards' taps are on the case, where a single one is too easy to set off by accident, so they use the menu bar app.

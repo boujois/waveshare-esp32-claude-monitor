@@ -601,7 +601,8 @@ def _open_session(short_id):
     if short_id == "chat":
         _run(["open", "-b", CLAUDE_APP_ID])
         return "Claude"
-    d = next((d for sid, d in read_live_sessions().items() if sid.startswith(short_id)), None) if short_id else None
+    sid, d = next(((sid, d) for sid, d in read_live_sessions().items() if sid.startswith(short_id)),
+                  (None, None)) if short_id else (None, None)
     if not d:
         log(f"open: no running session {short_id!r}")
         return None
@@ -624,6 +625,11 @@ def _open_session(short_id):
             _run(["open", bundle])
     elif name in FOLDER_EDITORS and cwd and os.path.isdir(cwd):
         _run(["open", "-a", bundle, cwd])
+    elif name == "Claude.app":
+        # The Code tab: the link `claude --desktop --resume <id>` opens shows that session, not
+        # whichever tab you were last on
+        if _run(["open", f"claude://resume?session={sid}"]).returncode != 0:
+            _run(["open", bundle])
     else:
         _run(["open", bundle])
     log(f"opened {short_id} in {name[:-4]} ({bundle})")
