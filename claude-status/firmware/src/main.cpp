@@ -133,13 +133,11 @@ static LGFX lcd;
 static LGFX_Sprite frame(&lcd);
 
 #ifdef BOARD_WAVESHARE_TOUCH
-constexpr const char *BOARD_NAME = "waveshare-s3-touch-lcd128";
-// The non-touch image boots on this board but leaves the backlight off, so Wi-Fi updates only
-// accept images built for the touch version (they all carry this string)
-static const char OTA_BOARD_TAG[] = "claude-monitor-board=waveshare-s3-touch-lcd128;";
-#define REQUIRE_OTA_BOARD_TAG 1
+// The non-touch image boots on this board but leaves the backlight off; the board tag (below)
+// keeps Wi-Fi updates for one from reaching the other
+#define BOARD_ID "waveshare-s3-touch-lcd128"
 #else
-constexpr const char *BOARD_NAME = "waveshare-s3-lcd128";
+#define BOARD_ID "waveshare-s3-lcd128"
 #endif
 static void showFrame() { frame.pushSprite(0, 0); }
 
@@ -287,7 +285,7 @@ class TRGBDisplay {
 static TRGBDisplay lcd;
 static LGFX_Sprite frame;
 
-constexpr const char *BOARD_NAME = "lilygo-t-rgb";
+#define BOARD_ID "lilygo-t-rgb"
 static void showFrame() { lcd.present(frame); }
 
 // ---- Taps (taps.h) from the touch screen ----
@@ -325,12 +323,14 @@ bool tapsBegin(float) {
 uint32_t doubleTapCount() { return touchtaps::doubles; }
 uint32_t fiveTapCount() { return touchtaps::fives; }
 
-// Firmware for other boards would boot but drive the wrong screen, so Wi-Fi updates only
-// accept images that carry this tag (every T-RGB build does, via this very string).
-static const char OTA_BOARD_TAG[] = "claude-monitor-board=lilygo-t-rgb;";
-#define REQUIRE_OTA_BOARD_TAG 1
-
 #endif  // BOARD_LILYGO_T_RGB
+
+// Which board this firmware is for: /info reports it, so the Mac helper fetches the matching
+// update, and the release files are named after it (tools/build-release.sh).
+constexpr const char *BOARD_NAME = BOARD_ID;
+// Firmware for another board would boot but drive the wrong screen, so Wi-Fi updates only accept
+// images that carry this board's tag. Every build carries its own, via this very string.
+static const char OTA_BOARD_TAG[] = "claude-monitor-board=" BOARD_ID ";";
 static WebServer server(80);
 
 constexpr int CX = 120, CY = 120;
@@ -1137,19 +1137,29 @@ static bool otaAuthed = false, otaOk = false;
 static size_t otaTotal = 0;
 static String otaError;
 
-#ifdef REQUIRE_OTA_BOARD_TAG
 // Looks for OTA_BOARD_TAG anywhere in the incoming image, including across chunk boundaries.
 static size_t otaTagMatched = 0;
 static bool otaTagFound = false;
 static void scanForBoardTag(const uint8_t *buf, size_t len) {
-  const size_t n = sizeof(OTA_BOARD_TAG) - 1;
+  constexpr size_t n = sizeof(OTA_BOARD_TAG) - 1;
+  // Knuth-Morris-Pratt: after a mismatch, carry on from the longest part of the tag that still matches
+  static size_t fallback[n];
+  static bool ready = false;
+  if (!ready) {
+    fallback[0] = 0;
+    for (size_t i = 1, k = 0; i < n; i++) {
+      while (k && OTA_BOARD_TAG[i] != OTA_BOARD_TAG[k]) k = fallback[k - 1];
+      if (OTA_BOARD_TAG[i] == OTA_BOARD_TAG[k]) k++;
+      fallback[i] = k;
+    }
+    ready = true;
+  }
   for (size_t i = 0; i < len && !otaTagFound; i++) {
     char ch = (char)buf[i];
-    while (otaTagMatched && ch != OTA_BOARD_TAG[otaTagMatched]) otaTagMatched = 0;  // tag has no repeated prefix
+    while (otaTagMatched && ch != OTA_BOARD_TAG[otaTagMatched]) otaTagMatched = fallback[otaTagMatched - 1];
     if (ch == OTA_BOARD_TAG[otaTagMatched] && ++otaTagMatched == n) otaTagFound = true;
   }
 }
-#endif
 
 // Called repeatedly while the firmware file streams in
 static void handleUpdateUpload() {
@@ -1158,10 +1168,8 @@ static void handleUpdateUpload() {
     otaAuthed = authorized();
     otaOk = false;
     otaError = "";
-#ifdef REQUIRE_OTA_BOARD_TAG
     otaTagMatched = 0;
     otaTagFound = false;
-#endif
     if (!otaAuthed) return;
     otaTotal = server.header("X-Firmware-Size").toInt();
     drawUpdateProgress(0);
@@ -1169,9 +1177,7 @@ static void handleUpdateUpload() {
     otaOk = Update.begin(otaTotal ? otaTotal : UPDATE_SIZE_UNKNOWN);
   } else if (up.status == UPLOAD_FILE_WRITE) {
     if (!otaAuthed || !otaOk) return;
-#ifdef REQUIRE_OTA_BOARD_TAG
     scanForBoardTag(up.buf, up.currentSize);
-#endif
     if (Update.write(up.buf, up.currentSize) != up.currentSize) otaOk = false;
     static uint32_t lastDraw = 0;
     if (otaTotal && millis() - lastDraw > 250) {
@@ -1179,13 +1185,11 @@ static void handleUpdateUpload() {
       drawUpdateProgress(min(99, (int)(100.0 * up.totalSize / otaTotal)));
     }
   } else if (up.status == UPLOAD_FILE_END) {
-#ifdef REQUIRE_OTA_BOARD_TAG
     if (otaAuthed && otaOk && !otaTagFound) {
       Update.abort();
       otaOk = false;
       otaError = String("this firmware isn't built for the ") + BOARD_NAME;
     }
-#endif
     if (otaAuthed && otaOk) otaOk = Update.end(true);
   } else if (up.status == UPLOAD_FILE_ABORTED) {
     Update.abort();

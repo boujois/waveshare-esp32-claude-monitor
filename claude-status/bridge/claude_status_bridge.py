@@ -78,6 +78,14 @@ DEFAULT_CONFIG = {
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 PROJECT_REPO = "boujois/waveshare-esp32-claude-monitor"
 INSTALLER_SITE = "https://boujois.github.io/waveshare-esp32-claude-monitor"
+DEFAULT_BOARD = "waveshare-s3-lcd128"  # what a display that doesn't say which board it is
+
+
+def firmware_asset(board):
+    """The release file with the app-only firmware for a board, as /info names it (the Waveshare's
+    keeps the name it had before releases covered other boards)."""
+    board = board or DEFAULT_BOARD
+    return "claude-monitor-app.bin" if board == DEFAULT_BOARD else f"claude-monitor-app-{board}.bin"
 HELPER_DIR = Path(__file__).resolve().parent
 VERSION_PATH = Path(__file__).with_name("VERSION")  # written into release packages
 LOG_PATH = Path.home() / "Library/Logs/claude-status-bridge.log"  # where install.sh's agent logs
@@ -1324,7 +1332,8 @@ class Device:
         return f"http://{self.ip}{path}"
 
     def info(self):
-        """{"version", "paired", "ip"} from the display (firmware with Wi-Fi updates only)."""
+        """{"version", "board", "paired", "ip", ...} from the display (firmware with Wi-Fi updates only;
+        "board" since it came in more than one)."""
         with urllib.request.urlopen(self._url("/info"), timeout=5) as r:
             return json.load(r)
 
@@ -1579,8 +1588,8 @@ class Bridge:
         self.device = Device(cfg["device_host"])
         self.tz = posix_timezone()
         self.key = device_key(cfg)
-        self.release = {"tag": None, "next": 0}
-        self.display = {"version": None, "paired": None, "night": None, "next": 0}  # night: has night mode
+        self.release = {"tag": None, "assets": None, "next": 0}
+        self.display = {"version": None, "board": None, "paired": None, "night": None, "next": 0}  # night: has night mode
         self.state = {}  # the latest state for the display
         self.payload = None  # ...as sent, with its timestamp
         self.push_soon = False  # push on the next pass even if nothing changed
@@ -1657,7 +1666,11 @@ class Bridge:
     def update_available(self):
         """The latest release when the helper or the display is behind it, else None."""
         tag, current = self.release["tag"], self.display["version"]
-        if tag and (is_newer(tag, helper_version()) or is_newer(tag, current) or current == "old"):
+        assets = self.release["assets"]
+        # Only offer the display an update the release has firmware for (its board's)
+        has_firmware = assets is None or firmware_asset(self.display["board"]) in assets
+        if tag and (is_newer(tag, helper_version()) or (has_firmware and is_newer(tag, current))
+                    or current == "old"):
             return tag
         return None
 
@@ -1671,7 +1684,8 @@ class Bridge:
             "log_path": str(LOG_PATH),
             "claude_cli": claude_cli(),
             "display": {"host": self.device.host, "reachable": self.device.ok,
-                        "version": self.display["version"], "last_push": int(self.device.last_push),
+                        "version": self.display["version"], "board": self.display["board"],
+                        "last_push": int(self.device.last_push),
                         "night_mode": self.display["night"], "card": self.device.card},
             "update": self.update_available(),
             "usage": self.usage.status(),
@@ -1690,7 +1704,8 @@ class Bridge:
         display["next"] = now + 600
         try:
             info = self.device.info()
-            display.update(version=info.get("version"), paired=info.get("paired"), night="night" in info)
+            display.update(version=info.get("version"), board=info.get("board") or DEFAULT_BOARD,
+                           paired=info.get("paired"), night="night" in info)
             if not info.get("paired"):
                 self.device.pair(self.key)
                 display["paired"] = True
@@ -1706,7 +1721,8 @@ class Bridge:
             return
         self.release["next"] = now + self.cfg["update_check_interval"]
         try:
-            self.release["tag"] = latest_release()["tag"]
+            release = latest_release()
+            self.release.update(tag=release["tag"], assets=release["assets"])
         except (OSError, ValueError, KeyError) as e:
             self.release["next"] = now + 3600
             log("update check failed:", e)

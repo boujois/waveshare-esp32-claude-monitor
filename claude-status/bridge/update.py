@@ -138,9 +138,10 @@ def update_display(release, cfg, force):
     key = cs.device_key(cfg)
     if not info.get("paired"):
         device.pair(key)
-    app_url = release["assets"].get("claude-monitor-app.bin")
+    asset = cs.firmware_asset(info.get("board"))
+    app_url = release["assets"].get(asset)
     if not app_url:
-        say("✗ The release has no claude-monitor-app.bin")
+        say(f"✗ The release has no {asset} (firmware for this display's board, {info.get('board') or cs.DEFAULT_BOARD})")
         return False
     say(f"Updating the display {current} -> {latest} over Wi-Fi (about a minute, don't unplug it)...")
     try:

@@ -39,10 +39,10 @@ Ask them to plug the display into the Mac with a **data** USB-C cable (charge-on
 ls /dev/cu.usbmodem* /dev/cu.wchusbserial* 2>/dev/null
 ```
 
-Then confirm it's the right chip: `esptool.py --port <PORT> flash_id`. You're expecting `ESP32-S3`, `Embedded PSRAM 2MB` and `16MB` flash.
+Then confirm it's the right chip: `esptool.py --port <PORT> flash_id`. You're expecting `ESP32-S3` and `16MB` flash, plus `Embedded PSRAM 2MB` on the Waveshare board or `Embedded PSRAM 8MB` on a **LilyGO T-RGB**, which is also supported (see step 3). The PSRAM tells the two apart.
 
 - **No port appears:** try another cable or USB port. The board uses a WCH CH343 USB-serial chip (USB vendor ID `0x1a86`), which macOS supports without drivers.
-- **Make sure it's the non-touch board** (ESP32-S3-LCD-1.28 or the "-B" CNC-case version). The touch version (ESP32-S3-Touch-LCD-1.28) uses different reset and backlight pins (RST 14, BL 2), and the screen will stay blank with this firmware.
+- **Ask whether the Waveshare has a touch screen.** The touch version (ESP32-S3-Touch-LCD-1.28) has the same chip as the non-touch one (ESP32-S3-LCD-1.28, or the "-B" CNC-case version), so esptool can't tell them apart, but it uses different reset and backlight pins (RST 14, BL 2): the other version's software leaves its screen blank.
 
 ## 2. Wi-Fi and timezone
 
@@ -56,6 +56,8 @@ There's nothing to configure in code. **Wi-Fi is set up from a phone after flash
 FW=$(mktemp -d) && cd "$FW" && for f in bootloader partitions boot_app0 firmware; do curl -fsSLO "https://boujois.github.io/waveshare-esp32-claude-monitor/$f.bin"; done
 esptool.py --chip esp32s3 --port <PORT> --baud 921600 write_flash 0x0 bootloader.bin 0x8000 partitions.bin 0xe000 boot_app0.bin 0x10000 firmware.bin
 ```
+
+**For the Waveshare touch version or a LilyGO T-RGB** (8 MB PSRAM), download the same four parts from the site's `waveshare-s3-touch-lcd128/` or `lilygo-t-rgb/` folder instead (e.g. `.../waveshare-esp32-claude-monitor/lilygo-t-rgb/$f.bin`). Flashing one board's parts onto another leaves the screen blank; flashing the right ones fixes it.
 
 Use `esptool` instead of `esptool.py` if that's the name installed. Then check the version: `https://boujois.github.io/waveshare-esp32-claude-monitor/manifest.json` shows the release version, and after Wi-Fi is set up, `curl -s http://claude-status.local/` reports it as well.
 
@@ -168,4 +170,4 @@ Run `"$HOME/Library/Application Support/Claude Monitor/uninstall.sh"` (it also r
 
 ## For maintainers
 
-Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. It attaches `Claude-Monitor-Mac.zip` and `claude-monitor-firmware.bin` to the release and publishes the installer site to GitHub Pages. The `github-pages` environment allows `main` and `v*` tags. `tools/build-release.sh` builds the same files locally into `dist/`. Both build the menu bar app into the Mac zip, so they need macOS with Xcode or the Command Line Tools 16 or later (the workflow runs on `macos-latest`).
+Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed. It attaches `Claude-Monitor-Mac.zip` and each board's firmware (`claude-monitor-firmware.bin` and `claude-monitor-app.bin` for the Waveshare, the same with `-waveshare-s3-touch-lcd128` or `-lilygo-t-rgb` for the others) to the release and publishes the installer site to GitHub Pages. The `github-pages` environment allows `main` and `v*` tags. `tools/build-release.sh` builds the same files locally into `dist/`. Both build the menu bar app into the Mac zip, so they need macOS with Xcode or the Command Line Tools 16 or later (the workflow runs on `macos-latest`).
