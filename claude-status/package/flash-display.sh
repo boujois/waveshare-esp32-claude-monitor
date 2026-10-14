@@ -5,9 +5,10 @@
 #
 # Install.command runs this from the firmware folder of the Mac package, next to the four
 # files it writes for the Waveshare board; each other board's are in a folder named after it
-# (lilygo-t-rgb/). The board is told apart by its PSRAM, which esptool reports: the Waveshare's
-# ESP32-S3R2 has 2 MB, the LilyGO T-RGB's ESP32-S3R8 has 8 MB. CLAUDE_MONITOR_BOARD=<board>
-# skips the check. They're the same parts at the same addresses as the installer page, so
+# (waveshare-s3-touch-lcd128/, lilygo-t-rgb/). The LilyGO T-RGB is told apart by its PSRAM, which
+# esptool reports: its ESP32-S3R8 has 8 MB, the Waveshare's ESP32-S3R2 2 MB. The two Waveshare
+# versions have the same chip, so for those it asks whether the display has a touch screen.
+# CLAUDE_MONITOR_BOARD=<board> skips both. They're the same parts at the same addresses as the installer page, so
 # the display keeps any Wi-Fi and pairing it already has. Flashing uses Espressif's
 # standalone esptool, downloaded for the job and checked against a pinned checksum, so
 # neither Python nor a browser is needed. CLAUDE_MONITOR_ESPTOOL=<path> uses another esptool.
@@ -45,8 +46,9 @@ get_esptool() {
   ESPTOOL="$TMP/esptool-macos-$arch/esptool"
 }
 
-# Prints which board is on the port: lilygo-t-rgb (8 MB PSRAM) or waveshare-s3-lcd128 (2 MB, or
-# anything else). Leaves the display waiting in its bootloader, so writing to it comes next.
+# Prints which board is on the port: lilygo-t-rgb (8 MB PSRAM), or for anything else the Waveshare,
+# waveshare-s3-touch-lcd128 if the person says it has a touch screen, else waveshare-s3-lcd128.
+# Leaves the display waiting in its bootloader, so writing to it comes next.
 detect_board() {
   local out
   out="$("$ESPTOOL" --chip esp32s3 --port "$PORT" --after no-reset chip-id 2>&1)" || {
@@ -55,9 +57,17 @@ detect_board() {
   }
   if echo "$out" | grep -q "PSRAM 8MB"; then
     echo lilygo-t-rgb
-  else
-    echo waveshare-s3-lcd128
+    return
   fi
+  local answer=""
+  if [ -r /dev/tty ]; then
+    printf "Does the display have a touch screen (the Waveshare ESP32-S3-Touch-LCD-1.28)? [y/N] " >/dev/tty
+    read -r answer </dev/tty || answer=""
+  fi
+  case "$answer" in
+    [yY]*) echo waveshare-s3-touch-lcd128 ;;
+    *) echo waveshare-s3-lcd128 ;;
+  esac
 }
 
 main() {
@@ -74,6 +84,7 @@ main() {
   fi
   case "$board" in
     waveshare-s3-lcd128) echo "This is the Waveshare round display." ;;
+    waveshare-s3-touch-lcd128) echo "This is the Waveshare round display with a touch screen."; parts="$DIR/waveshare-s3-touch-lcd128" ;;
     lilygo-t-rgb) echo "This is the LilyGO T-RGB round display."; parts="$DIR/lilygo-t-rgb" ;;
     *) echo "Unknown board \"$board\"" >&2; return 1 ;;
   esac

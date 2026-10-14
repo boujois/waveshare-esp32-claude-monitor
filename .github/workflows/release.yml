@@ -52,6 +52,7 @@ jobs:
         run: |
           gh release create "${{ github.ref_name }}" \
             dist/Claude-Monitor-Mac.zip dist/claude-monitor-firmware.bin dist/claude-monitor-app.bin \
+            dist/claude-monitor-firmware-waveshare-s3-touch-lcd128.bin dist/claude-monitor-app-waveshare-s3-touch-lcd128.bin \
             dist/claude-monitor-firmware-lilygo-t-rgb.bin dist/claude-monitor-app-lilygo-t-rgb.bin \
             --title "Claude Monitor ${{ github.ref_name }}" \
             --notes-file - <<'EOF'
@@ -64,9 +65,9 @@ jobs:
 
           **Already installed?** Click **Update** in the menu bar app, run the Terminal line above again, or ask Claude Code to *"update my Claude monitor"*. From v1.1.0 on, the display updates over Wi-Fi.
 
-          **Works with two displays:** the Waveshare ESP32-S3-LCD-1.28 and the LilyGO T-RGB (2.1" or 2.8"). The installers and Wi-Fi updates pick the right software for yours.
+          **Works with three displays:** the Waveshare ESP32-S3-LCD-1.28, its touch version (ESP32-S3-Touch-LCD-1.28) and the LilyGO T-RGB (2.1" or 2.8"). The installers and Wi-Fi updates put the right software on yours.
 
-          If the installer page doesn't open, flash the image for your display with [Espressif's web flasher](https://espressif.github.io/esptool-js/) at address `0x0`: `claude-monitor-firmware.bin` for the Waveshare, `claude-monitor-firmware-lilygo-t-rgb.bin` for the LilyGO T-RGB. The `claude-monitor-app…bin` files are the app-only images used for Wi-Fi updates.
+          If the installer page doesn't open, flash the image for your display with [Espressif's web flasher](https://espressif.github.io/esptool-js/) at address `0x0`: `claude-monitor-firmware.bin` for the Waveshare, `claude-monitor-firmware-waveshare-s3-touch-lcd128.bin` for its touch version, `claude-monitor-firmware-lilygo-t-rgb.bin` for the LilyGO T-RGB. The `claude-monitor-app…bin` files are the app-only images used for Wi-Fi updates.
           EOF
 
       - uses: actions/upload-pages-artifact@v3

@@ -81,7 +81,7 @@ You change the options from a small [menu bar app](#the-menu-bar-app) on your Ma
 
 | | |
 |---|---|
-| 🖥️ **The display** | [Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28): an ESP32-S3 with a 1.28" 240×240 round screen (GC9A01). The version with the CNC metal case ("-B") looks great on a desk. Get the **non-touch** version; the touch version uses different pins. Or a [LilyGO T-RGB](#using-a-lilygo-t-rgb), a bigger 480×480 round screen. |
+| 🖥️ **The display** | One of these ESP32-S3 round displays. The installers and Wi-Fi updates put the right software on each:<br>• **[Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28)**: 1.28", 240×240. The "-B" version with the CNC metal case looks great on a desk.<br>• **[Waveshare ESP32-S3-Touch-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.28)**: the same display with a touch panel (which isn't used).<br>• **[LilyGO T-RGB](#using-a-lilygo-t-rgb)**: a bigger 2.1" or 2.8", 480×480 screen, where you tap the screen instead of the case. |
 | 🔌 **A USB-C cable** | For flashing, and for power afterwards. Once it's set up, any USB phone charger will do. |
 | 🍎 **A Mac** | Running Claude Code. The helper uses `launchd` and the macOS Keychain, and the [menu bar app](#the-menu-bar-app) needs macOS 13 or later. |
 | 📶 **2.4 GHz Wi-Fi** | The ESP32 can't join 5 GHz-only networks. |
@@ -721,7 +721,7 @@ Click **Start helper**. If it doesn't start, **Open Log** shows why, and running
 <summary><b>Colours look wrong, or the screen is blank</b></summary>
 
 - **Inverted colours** (white background): flip `cfg.invert` in the `LGFX` class in `main.cpp`.
-- **Blank screen:** double-check you have the **non-touch** ESP32-S3-LCD-1.28. The touch version uses different reset and backlight pins (RST 14, BL 2).
+- **Blank screen:** the software may be for the other Waveshare version. The touch version (ESP32-S3-Touch-LCD-1.28) uses different reset and backlight pins (RST 14, BL 2). Install again and answer **yes** when asked about a touch screen (or pick it on the installer page), or build it with `pio run -e waveshare-s3-touch-lcd128 -t upload`.
 </details>
 
 <details>

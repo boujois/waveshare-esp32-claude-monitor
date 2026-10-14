@@ -16,7 +16,7 @@ VERSION="${1:-dev}"
 DIST="$ROOT/dist"
 FW="$ROOT/claude-status/firmware"
 DEFAULT_BOARD="waveshare-s3-lcd128"
-OTHER_BOARDS="lilygo-t-rgb"  # PlatformIO environments, also the board names the firmware reports
+OTHER_BOARDS="waveshare-s3-touch-lcd128 lilygo-t-rgb"  # PlatformIO environments, also the board names the firmware reports
 PIO_HOME="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
 
 # Check before the long firmware build, not after
