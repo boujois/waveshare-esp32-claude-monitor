@@ -8,5 +8,6 @@
 bool tapsBegin(float tapG);
 
 // How often each gesture has happened so far: compare with earlier counts to spot new ones.
+uint32_t singleTapCount();  // a single tap on its own (touch screens only: 0 with the motion sensor)
 uint32_t doubleTapCount();  // exactly two quick taps
 uint32_t fiveTapCount();    // five quick taps (more in the same run don't count again)

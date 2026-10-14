@@ -128,7 +128,7 @@ private struct SessionsLine: View {
     }
 }
 
-/// The card on the display's screen, drawn like a small copy of it, with Dismiss.
+/// The card on the display's screen, drawn like a small copy of it, with Open and Dismiss.
 private struct CardLine: View {
     @ObservedObject var model: MonitorModel
     let card: DisplayCard
@@ -150,6 +150,13 @@ private struct CardLine: View {
                 }
             }
             Spacer(minLength: 6)
+            if card.id?.nonEmpty != nil {
+                Button("Open", action: model.openCard)
+                    .controlSize(.small)
+                    .disabled(model.opening)
+                    .help("Bring up the app this session runs in: its terminal tab or editor window")
+                    .accessibilityLabel("Open the session for \(card.title ?? "card")")
+            }
             Button("Dismiss", action: model.dismissCard)
                 .controlSize(.small)
                 .disabled(model.dismissing)
