@@ -18,6 +18,7 @@ final class MonitorModel: ObservableObject {
     @Published private(set) var retrying = false
     @Published private(set) var startingHelper = false
     @Published private(set) var dismissing = false
+    @Published private(set) var opening = false
     /// Set for a few minutes after Update opened Terminal, so a second click doesn't start a second update.
     @Published private(set) var updating = false
     /// Set while waiting for the user to finish `claude auth login` in Terminal.
@@ -320,6 +321,21 @@ final class MonitorModel: ObservableObject {
             defer { dismissing = false }
             do {
                 accept(try await client.dismissCard(key))
+            } catch {
+                failed(error, section: .header)
+            }
+        }
+    }
+
+    /// Brings the app running the card's session to the front: its terminal tab or editor window.
+    func openCard() {
+        guard !opening, let key = status?.display?.card?.key else { return }
+        opening = true
+        clearError(.header)
+        Task {
+            defer { opening = false }
+            do {
+                accept(try await client.openCard(key))
             } catch {
                 failed(error, section: .header)
             }

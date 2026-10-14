@@ -379,7 +379,7 @@ Claude Monitor puts a small icon in your Mac's menu bar, near the clock: a **cir
 Click it for:
 
 - **Status:** whether the display is connected, and which firmware it runs; your sessions, e.g. *1 needs you · 2 working*; any Anthropic incident; and an **Update to v1.x.x…** button when there's a new release.
-- **What's on the display:** the alert, Done card or CI card on its screen, with a **Dismiss** button that hides it just like a double tap. This needs display firmware newer than v1.5.0 (see [Updating](#updating)).
+- **What's on the display:** the alert, Done card or CI card on its screen, with an **Open** button that brings up the app that session runs in (see [Jump to the session](#jump-to-the-session)) and a **Dismiss** button that hides it just like a double tap. These need display firmware newer than v1.5.0 (see [Updating](#updating)); Open needs a newer one still.
 - **Plan usage:** **Connect**, then your 5-hour and weekly usage and when each resets. **Disconnect** turns it off. See [step 6](#6-optional-turn-on-plan-usage-rings).
 - **Night mode:** on or off, **From** and **To** times, **Screen** *Off* or *Dim*, and **Alerts still light it up**. See [Night mode](#night-mode).
 - **Display:** switches for **Cat**, **CI checks** and **Anthropic incidents**.
@@ -398,7 +398,7 @@ The installer puts the app in `~/Applications` and starts it when you log in. **
 
 ## Using a LilyGO T-RGB
 
-The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. The T-RGB has no motion sensor, so the case taps are **taps on the screen** instead: double-tap the screen to dismiss a card, or tap it 5 times for diagnostics. The **BOOT** button works as described above.
+The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. The T-RGB has no motion sensor, so the case taps are **taps on the screen** instead: tap a card once to [jump to its session](#jump-to-the-session) on your Mac, double-tap to dismiss it, or tap 5 times for diagnostics. The **BOOT** button works as described above.
 
 It installs and updates like the Waveshare: the one-line installer, `Install.command` and the [installer page](https://boujois.github.io/waveshare-esp32-claude-monitor/) all put the right software on it (the installers tell the boards apart by their memory; on the page, pick **LilyGO T-RGB**), and the menu bar app's **Update** button updates it over Wi-Fi with the T-RGB build from each release.
 
@@ -495,6 +495,17 @@ If several sessions are waiting, the one that has waited longest is shown, and t
 Double tap uses the board's built-in motion sensor. Typing, putting a mug down or knocking on the desk doesn't set it off, and neither does picking the display up.
 
 <br clear="right">
+
+### Jump to the session
+
+To answer an alert, you need the session that's asking. **Open** in the [menu bar app](#the-menu-bar-app), or a single tap on the card on a LilyGO T-RGB's touch screen, brings it up on your Mac:
+
+- **Terminal or iTerm2:** the app comes forward on the tab running that session. The first time, macOS asks whether the Claude Monitor helper (python3) may control the app: click **OK**.
+- **VS Code, Cursor, Windsurf:** the window with that session's folder comes forward.
+- **The Claude app's Code tab:** the app comes forward on that session. **A chat in the Claude app:** the app comes forward.
+- **Anything else:** the app it runs in comes forward. Sessions in `tmux` or over `ssh` aren't in an app, so nothing opens.
+
+The T-RGB shows *Opening on your Mac* when you tap. The Waveshare boards' taps are on the case, where a single one is too easy to set off by accident, so they use the menu bar app.
 
 ### The Done card
 

@@ -140,6 +140,7 @@ static LGFX_Sprite frame(&lcd);
 #define BOARD_ID "waveshare-s3-lcd128"
 #endif
 static void showFrame() { frame.pushSprite(0, 0); }
+constexpr bool TAP_TO_OPEN = false;  // a tap on the case is too easy to set off by accident
 
 #else  // BOARD_LILYGO_T_RGB
 
@@ -287,14 +288,15 @@ static LGFX_Sprite frame;
 
 #define BOARD_ID "lilygo-t-rgb"
 static void showFrame() { lcd.present(frame); }
+constexpr bool TAP_TO_OPEN = true;  // a single tap on a card opens its session on the Mac
 
 // ---- Taps (taps.h) from the touch screen ----
 // The T-RGB has no motion sensor, so the gestures that are taps on the Waveshare's case are taps
-// on the screen here: a run of touches 60-450 ms apart; exactly two is a double tap (counted once
-// the run is over), and the fifth touch of a run counts as five taps straight away.
+// on the screen here: a run of touches 60-450 ms apart; exactly one is a single tap and exactly two a
+// double tap (each counted once the run is over), and the fifth touch counts as five taps straight away.
 namespace touchtaps {
 constexpr uint32_t POLL_MS = 10, GAP_MIN = 60, GAP_MAX = 450;
-volatile uint32_t doubles = 0, fives = 0;
+volatile uint32_t singles = 0, doubles = 0, fives = 0;
 
 void watch(void *) {
   bool wasDown = false;
@@ -309,6 +311,7 @@ void watch(void *) {
     }
     wasDown = down;
     if (run && now - lastTap > GAP_MAX) {
+      if (run == 1) singles = singles + 1;
       if (run == 2) doubles = doubles + 1;
       run = 0;
     }
@@ -320,6 +323,7 @@ void watch(void *) {
 bool tapsBegin(float) {
   return xTaskCreatePinnedToCore(touchtaps::watch, "touchtaps", 4096, nullptr, 5, nullptr, 0) == pdPASS;
 }
+uint32_t singleTapCount() { return touchtaps::singles; }
 uint32_t doubleTapCount() { return touchtaps::doubles; }
 uint32_t fiveTapCount() { return touchtaps::fives; }
 
@@ -386,6 +390,10 @@ struct State {
 static State st;
 static String dismissedWaiting, dismissedDone;  // sessions on screen when you last dismissed each card
 static String dismissedCI;                      // the CI card's key when you last dismissed it
+// Open on the Mac (a single tap on a card): the Mac brings that session's app to the front when
+// openSeq changes. openBoot tells this run apart from the last, as openSeq restarts at 0.
+static uint32_t openSeq = 0, openBoot = 0, openShownAt = 0;
+static String openId;
 static bool tapReady = false;                   // the motion sensor was found, so taps on the case work
 static WiFiManager wifiManager;
 static Preferences prefs;
@@ -1280,6 +1288,7 @@ static void replyWithCard(JsonDocument &reply) {
   if (key.length()) {
     JsonObject c = reply["card"].to<JsonObject>();
     c["key"] = key;
+    c["id"] = card.alert ? card.alert->id : card.ci ? st.ci.id : card.done->id;  // its session
     if (card.alert) {
       c["icon"] = card.alert->kind == "question" ? "question" : "exclamation";
       c["title"] = headline(card.alert->kind);
@@ -1297,6 +1306,11 @@ static void replyWithCard(JsonDocument &reply) {
   } else {
     reply["card"] = nullptr;
   }
+  JsonObject o = reply["open"].to<JsonObject>();
+  o["boot"] = openBoot;
+  o["seq"] = openSeq;
+  o["id"] = openId;
+  o["tap"] = TAP_TO_OPEN;  // whether a tap on the display can ask (so the Mac checks in more often)
   String out;
   serializeJson(reply, out);
   server.send(200, "application/json", out);
@@ -1359,6 +1373,7 @@ void setup() {
   }
 #endif
 
+  openBoot = esp_random() | 1;
   tapReady = tapsBegin(TAP_G);
 #ifdef BOARD_LILYGO_T_RGB
   Serial.println(tapReady ? "Taps on the touch screen work" : "Couldn't start watching the touch screen");
@@ -1551,8 +1566,11 @@ void loop() {
 
   // Taps on the case: five quick taps open diagnostics, and a double tap (like a BOOT press)
   // closes them, or otherwise dismisses the card on screen
-  static uint32_t doubles = 0, fives = 0, diagnosticsSince = 0;
-  uint32_t d = doubleTapCount(), f = fiveTapCount();
+  static uint32_t singles = singleTapCount(), doubles = 0, fives = 0, diagnosticsSince = 0;
+  uint32_t one = singleTapCount(), d = doubleTapCount(), f = fiveTapCount();
+  // A single tap on a card (touch screens only) asks the Mac to open that session's app
+  bool openTap = one != singles && !diagnosticsSince;
+  singles = one;
 
   bool dismiss = pressed || d != doubles;
   if (f != fives) {
@@ -1585,6 +1603,20 @@ void loop() {
     }
   }
 
+  if (openTap) {
+    if (millis() - darkChanged < TAP_DELAY_MS ? wasDark : dark) {
+      if (night) peekSince = millis() | 1;  // on the dark screen, a tap only lights it, like a double tap
+    } else {
+      String id = card.alert ? card.alert->id : card.ci ? st.ci.id : card.done ? card.done->id : String();
+      if (id.length()) {
+        openId = id;
+        openSeq++;
+        openShownAt = millis() | 1;
+        Serial.println("Open on the Mac: " + id);
+      }
+    }
+  }
+
   if (dismiss && !diagnosticsSince) {
     dismissCard(card);
     card = pickCard(stale, alertFirst);
@@ -1595,6 +1627,10 @@ void loop() {
   else if (card.ci) drawCI(st.ci);
   else if (card.done) drawDone(*card.done, st.done - 1);
   else drawStatus(stale);
+  if (openShownAt && millis() - openShownAt < 2500 && !diagnosticsSince) {
+    frame.fillRoundRect(CX - 78, 198, 156, 20, 10, COL_TRACK);
+    text("Opening on your Mac", CX, 208, COL_TEXT, &fonts::Font2);
+  }
   showFrame();
 
   int level = backlight(nightMode, night, diagnosticsSince, peekSince, card.alert);

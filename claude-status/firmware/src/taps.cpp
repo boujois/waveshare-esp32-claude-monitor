@@ -183,5 +183,7 @@ bool tapsBegin(float tapG) {
   return true;
 }
 
+// A lone tap on the case is too easy to set off by accident (a knock, a mug), so it never counts
+uint32_t singleTapCount() { return 0; }
 uint32_t doubleTapCount() { return doubles; }
 uint32_t fiveTapCount() { return fives; }
