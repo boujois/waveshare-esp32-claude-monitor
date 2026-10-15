@@ -38,6 +38,7 @@
 #include <sys/time.h>
 #include <time.h>
 
+#include <algorithm>
 #include <utility>
 #include <vector>
 
@@ -326,6 +327,9 @@ bool tapsBegin(float) {
 uint32_t singleTapCount() { return touchtaps::singles; }
 uint32_t doubleTapCount() { return touchtaps::doubles; }
 uint32_t fiveTapCount() { return touchtaps::fives; }
+uint32_t swipeLeftCount() { return 0; }  // swipes are read on the Waveshare touch board only, so far
+uint32_t swipeRightCount() { return 0; }
+uint8_t lastTouchGesture() { return 0; }
 
 #endif  // BOARD_LILYGO_T_RGB
 
@@ -356,6 +360,7 @@ const uint32_t COL_ERR     = 0xFF453A;
 
 struct Session {
   String id, name, state, kind, detail;
+  String src;  // the Mac it came from ("source" in its push; "" from helpers that don't say)
   uint32_t since = 0;
 };
 
@@ -368,6 +373,7 @@ struct CI {
   String checks;       // a letter per check, in ring order: P passed, F failed, C cancelled, R running, Q queued
   String detail;       // the checks that failed, or that are running
   String key;          // changes when there's something new to show
+  String src;          // the Mac it came from
   uint32_t since = 0;  // when the run started (while running) or finished
 };
 
@@ -387,13 +393,24 @@ struct State {
   CI ci;
 };
 
-static State st;
+static State st;  // what's on screen: every Mac's latest push, merged (see mergeSources())
+
+// Several Macs can push to one display. Each push says which Mac sent it ("source"), and the
+// display keeps the latest from each; a Mac that's been quiet for SOURCE_FORGET_MS gives up its
+// place. Pushes without a "source" (helpers from before this) all count as one Mac.
+constexpr size_t MAX_SOURCES = 4;
+constexpr uint32_t SOURCE_FORGET_MS = 10 * 60 * 1000;
+struct Source {
+  String name;
+  State state;
+};
+static std::vector<Source> sources;  // in the order they were first heard from
 static String dismissedWaiting, dismissedDone;  // sessions on screen when you last dismissed each card
 static String dismissedCI;                      // the CI card's key when you last dismissed it
 // Open on the Mac (a single tap on a card): the Mac brings that session's app to the front when
 // openSeq changes. openBoot tells this run apart from the last, as openSeq restarts at 0.
 static uint32_t openSeq = 0, openBoot = 0, openShownAt = 0;
-static String openId;
+static String openId, openSrc;  // openSrc: the Mac that session runs on, so only it opens it
 static bool tapReady = false;                   // the motion sensor was found, so taps on the case work
 static WiFiManager wifiManager;
 static Preferences prefs;
@@ -436,12 +453,96 @@ static String describeNight(const NightMode &n) {
 
 static void replyWithCard(JsonDocument &reply);
 
+static bool sourceStale(const Source &x, uint32_t now) { return now - x.state.rxMillis > STALE_MS; }
+
+// Keeps a push as its Mac's latest, making room for a new Mac if need be. Returns its index.
+static size_t storeSource(const String &name, State &&s) {
+  uint32_t now = millis();
+  for (size_t i = 0; i < sources.size(); i++) {
+    if (sources[i].name == name) {
+      sources[i].state = std::move(s);
+      return i;
+    }
+  }
+  for (size_t i = 0; i < sources.size();) {  // Macs long gone give up their place
+    if (now - sources[i].state.rxMillis > SOURCE_FORGET_MS) sources.erase(sources.begin() + i);
+    else i++;
+  }
+  if (sources.size() >= MAX_SOURCES) {  // still full: the quietest Mac makes way
+    size_t oldest = 0;
+    for (size_t i = 1; i < sources.size(); i++)
+      if (sources[i].state.rxMillis < sources[oldest].state.rxMillis) oldest = i;
+    sources.erase(sources.begin() + oldest);
+  }
+  Serial.println("Mac connected: " + (name.length() ? name : String("(unnamed)")));
+  sources.push_back({name, std::move(s)});
+  return sources.size() - 1;
+}
+
+// The Mac whose settings (timezone, cat, night mode) the display follows: the first one heard
+// from that's still pushing. Two Macs with different settings would otherwise take turns, and
+// each turn would be written to flash.
+static bool settingsSource(size_t i) {
+  uint32_t now = millis();
+  for (size_t j = 0; j < sources.size(); j++)
+    if (!sourceStale(sources[j], now)) return j == i;
+  return true;
+}
+
+// Builds st from every Mac still pushing (all of them, if none is, so "Mac offline" shows the last
+// of them). Sessions are ordered as the helper orders them: waiting (longest first), working,
+// error, done (newest first), idle, so the card picked is the same as with one Mac.
+static void mergeSources() {
+  uint32_t now = millis();
+  bool anyFresh = false;
+  for (const Source &x : sources) anyFresh |= !sourceStale(x, now);
+
+  State m;
+  for (const Source &x : sources) {
+    const State &s = x.state;
+    m.valid |= s.valid;
+    m.rxMillis = max(m.rxMillis, s.rxMillis);
+    if (anyFresh && sourceStale(x, now)) continue;
+    m.sessions.insert(m.sessions.end(), s.sessions.begin(), s.sessions.end());
+    m.busy += s.busy;
+    m.idle += s.idle;
+    m.waiting += s.waiting;
+    m.done += s.done;
+    m.errors += s.errors;
+    if (s.haveUsage && !m.haveUsage) {  // the first Mac with plan usage on: one plan, one reading
+      m.haveUsage = true;
+      m.h5 = s.h5;
+      m.d7 = s.d7;
+      m.h5Reset = s.h5Reset;
+      m.d7Reset = s.d7Reset;
+    }
+    if (s.haveToday) {  // each Mac has its own transcripts, so today's activity adds up
+      m.haveToday = true;
+      m.tokens += s.tokens;
+      m.prompts += s.prompts;
+    }
+    if (!m.update.length()) m.update = s.update;
+    if (!m.incident.length()) m.incident = s.incident;
+    if (!m.ci.present && s.ci.present) m.ci = s.ci;
+  }
+  auto rank = [](const String &state) {
+    return state == "waiting" ? 0 : state == "busy" ? 1 : state == "error" ? 2 : state == "done" ? 3 : 4;
+  };
+  std::stable_sort(m.sessions.begin(), m.sessions.end(), [&](const Session &a, const Session &b) {
+    int ra = rank(a.state), rb = rank(b.state);
+    if (ra != rb) return ra < rb;
+    return ra == 0 ? a.since < b.since : a.since > b.since;
+  });
+  st = std::move(m);
+}
+
 static void handleState() {
   JsonDocument doc;
   if (deserializeJson(doc, server.arg("plain"))) {
     server.send(400, "text/plain", "bad json");
     return;
   }
+  String src = (const char *)(doc["source"] | "");
   State s;
   s.valid = true;
   s.rxMillis = millis();
@@ -452,6 +553,7 @@ static void handleState() {
     x.state = (const char *)(o["state"] | "idle");
     x.kind = (const char *)(o["kind"] | "");
     x.detail = (const char *)(o["detail"] | "");
+    x.src = src;
     x.since = o["since"] | 0;
     s.sessions.push_back(x);
   }
@@ -484,11 +586,13 @@ static void handleState() {
     s.ci.checks = (const char *)(ci["checks"] | "");
     s.ci.detail = (const char *)(ci["detail"] | "");
     s.ci.key = (const char *)(ci["key"] | "");
+    s.ci.src = src;
     s.ci.since = ci["since"] | 0;
   }
   s.update = (const char *)(doc["update"] | "");
   if (!doc["incident"].isNull()) s.incident = (const char *)(doc["incident"]["name"] | "Claude incident");
-  st = std::move(s);
+  size_t from = storeSource(src, std::move(s));
+  mergeSources();
 
   // The Mac sends its clock too, which sets ours where the network blocks time servers (night mode
   // and the time on screen need it). The time servers still correct it if they're ever reached.
@@ -497,6 +601,13 @@ static void handleState() {
     struct timeval tv = {(time_t)macTime, 0};
     settimeofday(&tv, nullptr);
     Serial.println("Clock set from the Mac");
+  }
+
+  if (!settingsSource(from)) {  // another Mac's settings apply (see settingsSource())
+    JsonDocument reply;
+    reply["ok"] = true;
+    replyWithCard(reply);
+    return;
   }
 
   // The Mac helper sends its timezone as a POSIX TZ string; remember it across reboots
@@ -575,11 +686,63 @@ static void handleWifiReset() {
   ESP.restart();
 }
 
+// "Macs: studio 2s ago, laptop 5s ago\n" for GET /, when more than one Mac has pushed
+static String macsLine() {
+  if (sources.size() < 2) return "";
+  String out = "Macs:";
+  for (size_t i = 0; i < sources.size(); i++) {
+    const Source &x = sources[i];
+    out += (i ? ", " : " ") + (x.name.length() ? x.name : String("(unnamed)")) + " " +
+           String((millis() - x.state.rxMillis) / 1000) + "s ago";
+  }
+  return out + "\n";
+}
+
+// ---- Pages: swipe between all Macs and each Mac on its own ----
+// Only on the status screen, and only once two or more Macs have pushed. Alerts and Done cards
+// still come from every Mac, whichever page is showing, so nothing that needs you is missed.
+static bool pageAll = true;  // the merged page
+static String pageMac;       // otherwise, the Mac whose page it is
+
+// The page showing now: -1 for all Macs, else an index into sources
+static int currentPage() {
+  if (pageAll || sources.size() < 2) return -1;
+  for (size_t i = 0; i < sources.size(); i++)
+    if (sources[i].name == pageMac) return i;
+  pageAll = true;  // that Mac has gone: back to all of them
+  return -1;
+}
+
+// Moves by steps pages (+1 next, -1 previous), wrapping around: all Macs, then each Mac in turn
+static void turnPage(int steps) {
+  int n = sources.size() + 1;
+  if (n < 3) return;
+  int p = ((currentPage() + 1 + steps) % n + n) % n;
+  pageAll = p == 0;
+  if (p) pageMac = sources[p - 1].name;
+}
+
+// Dots at the bottom of the status screen, one per page, the current one filled
+static void drawPageDots() {
+  int n = sources.size() + 1, cur = currentPage() + 1;
+  const int gap = 10, y = 204;
+  int x = CX - (n - 1) * gap / 2;
+  for (int i = 0; i < n; i++, x += gap) {
+    if (i == cur) frame.fillSmoothCircle(x, y, 3, COL_TEXT);
+    else frame.drawCircle(x, y, 2, COL_FAINT);
+  }
+}
+
 static void handleRoot() {
   String out = "claude-status display " FW_VERSION "\nIP " + WiFi.localIP().toString() + "\nlast push " +
                (st.valid ? String((millis() - st.rxMillis) / 1000) + "s ago" : String("never")) + "\n" +
                (tapReady ? "taps seen: " + String(doubleTapCount()) + " double, " + String(fiveTapCount()) + " five"
                          : String("no motion sensor: taps on the case don't work")) + "\n" +
+               macsLine() +
+#ifdef BOARD_WAVESHARE_TOUCH
+               "swipes seen: " + String(swipeLeftCount()) + " left, " + String(swipeRightCount()) +
+               " right (last gesture 0x" + String(lastTouchGesture(), HEX) + ")\n" +
+#endif
                "night mode " + describeNight(nightMode) +
                (nightMode.enabled ? (nightActive(nightMode, time(nullptr)) ? " (on now)" : " (not now)") : "") +
                ", backlight " + String(brightness) + "\n";
@@ -908,7 +1071,9 @@ static void paceTick(int r0, int r1, float gone) {
   frame.drawWedgeLine(CX + (r0 - 2) * c, CY + (r0 - 2) * s, CX + (r1 + 2) * c, CY + (r1 + 2) * s, 1.2f, 1.2f, COL_TEXT);
 }
 
-static void drawStatus(bool stale) {
+// The status screen for a state: the merged one, or with mac set, one Mac's own (a page you swipe
+// to). The parameter is named st on purpose, so it stands in for the global in what follows.
+static void drawStatus(const State &st, bool stale, const String *mac = nullptr) {
   frame.fillScreen(COL_BG);
   bool live = st.valid && !stale;
   bool usage = live && st.haveUsage;
@@ -930,7 +1095,12 @@ static void drawStatus(bool stale) {
     localtime_r(&now, &t);
     char hm[6];
     strftime(hm, sizeof(hm), "%H:%M", &t);
-    text(hm, CX, 43, COL_DIM, &fonts::FreeSansBold9pt7b);
+    if (!mac) text(hm, CX, 43, COL_DIM, &fonts::FreeSansBold9pt7b);
+  }
+  if (mac) {  // a Mac's own page has its name where the time goes
+    frame.setFont(&fonts::FreeSansBold9pt7b);
+    text(fit(mac->length() ? *mac : String("Mac"), chordWidth(43, STATUS_TEXT_R)), CX, 43, COL_TEXT,
+         &fonts::FreeSansBold9pt7b);
   }
 
   // Pace ticks: usage past its tick will run out before the window resets
@@ -939,6 +1109,12 @@ static void drawStatus(bool stale) {
     paceTick(96, 104, windowGone(st.d7Reset, D7_SECS, now));
   }
 
+  if (!live && mac) {
+    if (showCat) drawCat(frame, CX - CAT_W / 2, 62, CatMood::Sleeping);
+    text("Offline", CX, 110, COL_DIM, &fonts::FreeSansBold9pt7b);
+    text("seen " + duration((millis() - st.rxMillis) / 1000) + " ago", CX, 136, COL_FAINT, &fonts::Font2);
+    return;
+  }
   if (!live) {
     if (showCat) drawCat(frame, CX - CAT_W / 2, 62, CatMood::Sleeping);
     text(st.valid ? "Mac offline" : "Waiting for Mac", CX, 110, COL_DIM, &fonts::FreeSansBold9pt7b);
@@ -1289,6 +1465,7 @@ static void replyWithCard(JsonDocument &reply) {
     JsonObject c = reply["card"].to<JsonObject>();
     c["key"] = key;
     c["id"] = card.alert ? card.alert->id : card.ci ? st.ci.id : card.done->id;  // its session
+    c["src"] = card.alert ? card.alert->src : card.ci ? st.ci.src : card.done->src;  // ...and its Mac
     if (card.alert) {
       c["icon"] = card.alert->kind == "question" ? "question" : "exclamation";
       c["title"] = headline(card.alert->kind);
@@ -1310,6 +1487,7 @@ static void replyWithCard(JsonDocument &reply) {
   o["boot"] = openBoot;
   o["seq"] = openSeq;
   o["id"] = openId;
+  o["src"] = openSrc;  // only that Mac opens it ("" for any, as before)
   o["tap"] = TAP_TO_OPEN;  // whether a tap on the display can ask (so the Mac checks in more often)
   String out;
   serializeJson(reply, out);
@@ -1582,6 +1760,13 @@ void loop() {
   doubles = d;
   fives = f;
 
+  // Swipes turn the status screen's pages: finger moving left shows the next one, like a phone
+  static uint32_t lefts = swipeLeftCount(), rights = swipeRightCount();
+  uint32_t sl = swipeLeftCount(), sr = swipeRightCount();
+  int swiped = (int)(sl - lefts) - (int)(sr - rights);
+  lefts = sl;
+  rights = sr;
+
   bool stale = st.valid && millis() - st.rxMillis > STALE_MS;
   bool night = nightActive(nightMode, time(nullptr));
   bool alertFirst = night && nightMode.alerts;
@@ -1610,6 +1795,7 @@ void loop() {
       String id = card.alert ? card.alert->id : card.ci ? st.ci.id : card.done ? card.done->id : String();
       if (id.length()) {
         openId = id;
+        openSrc = card.alert ? card.alert->src : card.ci ? st.ci.src : card.done->src;
         openSeq++;
         openShownAt = millis() | 1;
         Serial.println("Open on the Mac: " + id);
@@ -1622,11 +1808,19 @@ void loop() {
     card = pickCard(stale, alertFirst);
   }
 
+  bool statusShowing = !diagnosticsSince && !card.alert && !card.ci && !card.done;
+  if (swiped && statusShowing && !(millis() - darkChanged < TAP_DELAY_MS ? wasDark : dark)) turnPage(swiped);
+
   if (diagnosticsSince) drawDiagnostics(millis() - diagnosticsSince);
   else if (card.alert) drawAlert(*card.alert, card.waiting - 1);
   else if (card.ci) drawCI(st.ci);
   else if (card.done) drawDone(*card.done, st.done - 1);
-  else drawStatus(stale);
+  else {
+    int page = currentPage();
+    if (page < 0) drawStatus(st, stale);
+    else drawStatus(sources[page].state, millis() - sources[page].state.rxMillis > STALE_MS, &sources[page].name);
+    if (sources.size() >= 2) drawPageDots();
+  }
   if (openShownAt && millis() - openShownAt < 2500 && !diagnosticsSince) {
     frame.fillRoundRect(CX - 78, 198, 156, 20, 10, COL_TRACK);
     text("Opening on your Mac", CX, 208, COL_TEXT, &fonts::Font2);

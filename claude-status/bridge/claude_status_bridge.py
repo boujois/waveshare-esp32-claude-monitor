@@ -47,6 +47,9 @@ CONFIG_PATH = Path(__file__).with_name("config.json")
 
 DEFAULT_CONFIG = {
     "device_host": "claude-status.local",
+    # This Mac's name on the display, which can show several Macs at once; default: its local
+    # hostname (System Settings > General > Sharing). Each Mac sharing a display needs its own.
+    "source_name": None,
     "listen_port": 47823,
     # Off by default: reads Claude Code's OAuth token from the macOS Keychain.
     "plan_usage": False,
@@ -1407,6 +1410,19 @@ def save_config(**changes):
             raise
 
 
+def source_name(cfg):
+    """This Mac's name for the display: config.json's source_name, or its local hostname, which
+    unlike socket.gethostname() doesn't change with the network it's on."""
+    name = cfg.get("source_name")
+    if not name:
+        try:
+            name = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True,
+                                  text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            name = ""
+    return ascii_text(name or socket.gethostname().split(".")[0] or "mac", 32)
+
+
 def device_key(cfg):
     """The key this Mac pairs with the display, created and saved on first use."""
     if not cfg.get("device_key"):
@@ -1416,8 +1432,9 @@ def device_key(cfg):
 
 
 class Device:
-    def __init__(self, host):
+    def __init__(self, host, source=""):
         self.host = host
+        self.source = source  # this Mac's name on the display (see source_name())
         self.ip = None
         self.ok = None  # whether the last push got through; None before the first
         self.last_push = 0  # when a push last got through
@@ -1437,7 +1454,7 @@ class Device:
         request has already answered (a push and a dismissal can cross)."""
         card = reply.get("card") if isinstance(reply, dict) else None
         if isinstance(card, dict) and isinstance(card.get("key"), str) and card["key"]:
-            card = {k: str(card.get(k) or "") for k in ("key", "icon", "title", "name", "id")}
+            card = {k: str(card.get(k) or "") for k in ("key", "icon", "title", "name", "id", "src")}
         else:
             card = None
         with self._card_lock:
@@ -1451,7 +1468,9 @@ class Device:
         self.tap_open = req.get("tap") is True
         seen, now = self._open_seen, (req.get("boot"), req["seq"])
         self._open_seen = now
-        if seen and seen[0] == now[0] and seen[1] != now[1] and self.on_open:
+        # With several Macs on one display, only the one running the session opens it
+        mine = not req.get("src") or req.get("src") == self.source
+        if seen and seen[0] == now[0] and seen[1] != now[1] and self.on_open and mine:
             short_id = str(req.get("id") or "")
             threading.Thread(target=self.on_open, args=(short_id,), daemon=True).start()
 
@@ -1755,7 +1774,7 @@ class Bridge:
         self.focus = FocusWatcher()
         self.usage = UsageWatcher(cfg["plan_usage_interval"], s["plan_usage"], background=not once)
         self.chats = self.ci = self.incidents = None
-        self.device = Device(cfg["device_host"])
+        self.device = Device(cfg["device_host"], source_name(cfg))
         self.tz = posix_timezone()
         self.key = device_key(cfg)
         self.release = {"tag": None, "assets": None, "next": 0}
@@ -1835,6 +1854,8 @@ class Bridge:
         card = self.device.card
         if not card or (key is not None and card["key"] != key):
             raise DisplayError("That card isn't on the display any more.")
+        if card.get("src") and card["src"] != self.device.source:
+            raise DisplayError(f"That session is on another Mac ({card['src']}).")
         if not card.get("id"):
             raise DisplayError("Update the display to open its sessions from here.")
         if not open_session(card["id"]):
@@ -1924,6 +1945,7 @@ class Bridge:
         hook_snap, _ = self.hooks.snapshot()
         rows, counts = build_sessions(hook_snap, self.cfg["done_window"], chats.rows() if chats else ())
         state = {
+            "source": self.device.source,  # so one display can show several Macs
             "sessions": rows[:MAX_SESSIONS_SENT],
             "counts": counts,
             "today": self.today.snapshot(),

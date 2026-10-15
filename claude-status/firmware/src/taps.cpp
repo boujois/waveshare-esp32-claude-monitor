@@ -11,6 +11,10 @@
 // Measured on a display in a desk stand: taps on the case 0.26-1.7 g; putting a mug down or
 // knocking on the desk 0.10-0.19 g; typing on the same desk doesn't register at all; picking the
 // display up builds up too gradually to start a hit.
+//
+// On the touch version of the board (BOARD_WAVESHARE_TOUCH), the same task also reads swipes from
+// the CST816S touch controller, which shares the motion sensor's I2C bus. The controller recognises
+// gestures itself and pulls its interrupt pin low when it has something to report.
 
 #include "taps.h"
 
@@ -40,7 +44,7 @@ constexpr uint32_t NONE = UINT32_MAX;
 constexpr int RING = 1024;
 constexpr int MAX_PENDING = 8;
 
-uint8_t addr = 0;
+uint8_t addr = 0;  // the motion sensor's I2C address, 0 if there isn't one
 float minTapG = 0.25f;
 volatile uint32_t doubles = 0, fives = 0;
 int16_t recent[RING][3];  // recent readings, for measuring tilt around a hit
@@ -52,13 +56,65 @@ bool writeReg(uint8_t reg, uint8_t val) {
   return Wire.endTransmission() == 0;
 }
 
-bool readRegs(uint8_t reg, uint8_t *buf, uint8_t n) {
-  Wire.beginTransmission(addr);
+bool readRegsAt(uint8_t dev, uint8_t reg, uint8_t *buf, uint8_t n) {
+  Wire.beginTransmission(dev);
   Wire.write(reg);
-  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(addr, n) != n) return false;
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(dev, n) != n) return false;
   for (uint8_t i = 0; i < n; i++) buf[i] = Wire.read();
   return true;
 }
+
+bool readRegs(uint8_t reg, uint8_t *buf, uint8_t n) { return readRegsAt(addr, reg, buf, n); }
+
+// ---- Swipes on the touch screen (CST816S) ----
+volatile uint32_t swipesLeft = 0, swipesRight = 0;
+volatile uint8_t lastGesture = 0;
+#ifdef BOARD_WAVESHARE_TOUCH
+constexpr int PIN_TP_INT = 5, PIN_TP_RST = 13;
+constexpr uint8_t TOUCH_ADDR = 0x15, REG_GESTURE = 0x01, REG_CHIP_ID = 0xA7;
+constexpr uint8_t GESTURE_LEFT = 0x03, GESTURE_RIGHT = 0x04;  // the direction the finger moved
+constexpr uint32_t SWIPE_REPEAT_MS = 300;  // one swipe can be reported more than once
+bool touchFound = false;
+volatile bool touchPending = false;
+
+void IRAM_ATTR onTouch() { touchPending = true; }
+
+bool touchBegin() {
+  pinMode(PIN_TP_RST, OUTPUT);
+  digitalWrite(PIN_TP_RST, LOW);
+  delay(5);
+  digitalWrite(PIN_TP_RST, HIGH);
+  delay(50);
+  uint8_t id = 0;
+  touchFound = readRegsAt(TOUCH_ADDR, REG_CHIP_ID, &id, 1) && id != 0 && id != 0xFF;
+  pinMode(PIN_TP_INT, INPUT);
+  attachInterrupt(PIN_TP_INT, onTouch, FALLING);
+  return touchFound;
+}
+
+// Called from the watch task, which owns the I2C bus. The controller sleeps when idle and wakes
+// on a touch, so it's only read after it has signalled.
+void pollTouch() {
+  if (!touchPending) return;
+  touchPending = false;
+  uint8_t b[3];  // gesture, fingers, event (top two bits: 0 down, 1 up, 2 contact)
+  if (!readRegsAt(TOUCH_ADDR, REG_GESTURE, b, 3)) return;
+  touchFound = true;  // asleep at start-up, but answering now
+  uint8_t gesture = b[0], event = b[2] >> 6;
+  if (gesture) lastGesture = gesture;
+  if (event != 1 || (gesture != GESTURE_LEFT && gesture != GESTURE_RIGHT)) return;  // swipes count on lift
+  static uint32_t lastAt = 0;
+  static uint8_t lastSwipe = 0;
+  uint32_t now = millis();
+  if (gesture == lastSwipe && now - lastAt < SWIPE_REPEAT_MS) return;
+  lastSwipe = gesture;
+  lastAt = now;
+  if (gesture == GESTURE_LEFT) swipesLeft = swipesLeft + 1;
+  else swipesRight = swipesRight + 1;
+}
+#else
+void pollTouch() {}
+#endif
 
 int16_t median3(int16_t a, int16_t b, int16_t c) { return std::max(std::min(a, b), std::min(std::max(a, b), c)); }
 
@@ -97,6 +153,8 @@ void watch(void *) {
   TickType_t wake = xTaskGetTickCount();
   for (;;) {
     vTaskDelayUntil(&wake, 1);
+    pollTouch();
+    if (!addr) continue;  // no motion sensor: the task is only here for the touch screen
     uint8_t b[6];
     if (!readRegs(REG_AX_L, b, 6)) continue;
 
@@ -163,13 +221,22 @@ void watch(void *) {
 bool tapsBegin(float tapG) {
   minTapG = tapG;
   Wire.begin(PIN_SDA, PIN_SCL, 400000);
+#ifdef BOARD_WAVESHARE_TOUCH
+  touchBegin();
+  bool touch = true;  // its interrupt is attached either way: the controller may just be asleep
+#else
+  bool touch = false;
+#endif
   for (uint8_t a : {0x6B, 0x6A}) {  // depends on how the board wires the sensor
     addr = a;
     uint8_t id = 0;
     if (readRegs(REG_WHO_AM_I, &id, 1) && id == 0x05) break;
     addr = 0;
   }
-  if (!addr) return false;
+  if (!addr) {
+    if (touch) xTaskCreatePinnedToCore(watch, "taps", 4096, nullptr, 5, nullptr, 0);
+    return false;
+  }
 
   writeReg(REG_RESET, 0xB0);
   delay(15);
@@ -187,3 +254,6 @@ bool tapsBegin(float tapG) {
 uint32_t singleTapCount() { return 0; }
 uint32_t doubleTapCount() { return doubles; }
 uint32_t fiveTapCount() { return fives; }
+uint32_t swipeLeftCount() { return swipesLeft; }
+uint32_t swipeRightCount() { return swipesRight; }
+uint8_t lastTouchGesture() { return lastGesture; }
