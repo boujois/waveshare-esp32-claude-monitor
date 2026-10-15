@@ -402,7 +402,7 @@ The installer puts the app in `~/Applications` and starts it when you log in. **
 
 If the display is plugged into your Mac with a data USB cable, it keeps working when Wi-Fi doesn't: a new network, a router that won't let the display join, or the Mac and the display ending up on different networks. Whenever the helper can't reach the display over Wi-Fi, it sends the same updates down the USB cable instead, and the display shows them in place of its Wi-Fi setup screen. Alerts, Done cards, dismissing from the menu bar app and night mode all work the same.
 
-There's nothing to set up. The helper finds the display among your USB devices by its USB-serial chip, so other serial devices are left alone. Every minute it checks whether Wi-Fi reaches the display again, and switches back when it does. The menu bar app says **Display connected over USB** meanwhile, the helper's log says `pushing over USB (/dev/cu.usbmodem…)`, and the five-tap diagnostics show `(USB)` after when the Mac was last seen.
+There's nothing to set up. The helper finds the display among your USB devices by its USB-serial chip, so other serial devices are left alone. Every minute it checks whether Wi-Fi reaches the display again, and switches back when it does. A small USB symbol shows beside the clock on the status screen, the menu bar app says **Display connected over USB**, the helper's log says `pushing over USB (/dev/cu.usbmodem…)`, and the five-tap diagnostics show `(USB)` after when the Mac was last seen.
 
 A few things still need Wi-Fi: firmware updates from the Mac (the helper updates itself as usual), the screenshot at `/screen.bmp`, and the other HTTP endpoints. To turn the fallback off, set `"usb_fallback": false` in [`config.json`](#mac-helper-configjson).
 
