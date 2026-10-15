@@ -100,7 +100,8 @@ private struct DisplayLine: View {
         switch display?.reachable {
         case true?:
             let version = display?.version.map { $0 == "old" ? " · older firmware" : " · \($0)" } ?? ""
-            StatusLine(color: .green, text: "Display connected" + version)
+            let via = display?.link == "usb" ? " over USB" : ""
+            StatusLine(color: .green, text: "Display connected" + via + version)
         case false?:
             StatusLine(color: .orange, text: "Display not reachable (\(display?.host ?? "claude-status.local"))")
         case nil:

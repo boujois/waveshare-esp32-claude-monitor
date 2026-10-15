@@ -62,9 +62,10 @@ struct DisplayStatus: Decodable, Sendable {
     var lastPush: Double?
     var nightMode: Bool?    // false = firmware from before night mode; nil until known
     var card: DisplayCard?  // nil for the status screen, and from firmware before Dismiss
+    var link: String?       // "wifi", or "usb" while the helper reaches it over its USB cable
 
     enum CodingKeys: String, CodingKey {
-        case host, reachable, version, card
+        case host, reachable, version, card, link
         case lastPush = "last_push", nightMode = "night_mode"
     }
 }
