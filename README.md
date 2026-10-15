@@ -35,6 +35,7 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
   - [Option 3: Build it yourself, step by step](#option-3-build-it-yourself-step-by-step)
 - [The menu bar app](#the-menu-bar-app)
 - [Using a LilyGO T-RGB](#using-a-lilygo-t-rgb)
+- [One display, several Macs](#one-display-several-macs)
 - [Updating](#updating)
 - [Reading the screen](#reading-the-screen)
 - [Configuration](#configuration)
@@ -420,6 +421,23 @@ Each board only accepts Wi-Fi updates built for it (`/info` reports which board 
 
 ---
 
+## One display, several Macs
+
+One display can show up to four Macs at once, such as a desktop and a laptop. Install the Mac helper on each one (any of the [install options](#install), skipping the flashing step on the second Mac) and point them all at the same display. That's all: each helper tells the display which Mac it is, and the display merges them.
+
+- **Alerts:** a session on any Mac that needs you lights the display, and the one waiting longest is shown first, whichever Mac it's on.
+- **Status screen:** the session list and counts cover every Mac. Today's prompts and tokens add up across them. The plan usage rings come from the first Mac with plan usage turned on.
+- **Jump to the session:** a tap on a card opens the session on the Mac it's running on. The other Macs ignore it.
+- **Settings:** the cat, night mode and timezone follow the first Mac that connected, while it's still pushing. If it goes to sleep, the next one takes over.
+- **Mac offline** only shows once every Mac has gone quiet for 30 seconds. A Mac that's asleep drops off the display within about 10 seconds of that, and its place is freed after 10 minutes.
+- **Updates over Wi-Fi** come from the Mac the display paired with first, so use its menu bar app to update. See [Updating](#updating).
+
+Each Mac goes by its local hostname (**System Settings → General → Sharing**). Two Macs with the same name would count as one, so give them different names, or set `source_name` in [`config.json`](#mac-helper-configjson). The display's status page (`http://claude-status.local/`) lists the Macs it's hearing from.
+
+A display needs firmware from this version or later to merge Macs; older firmware shows whichever Mac pushed last. Helpers from before this version still work, and all count as one Mac.
+
+---
+
 ## Updating
 
 When a new version comes out, the display's footer alternates with **"Update: v1.x.x"**, and the menu bar panel shows an **Update to v1.x.x…** button. The helper checks GitHub once a day. To update, do any of these:
@@ -600,6 +618,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | Key | Default | What it does |
 |---|---|---|
 | `device_host` | `"claude-status.local"` | Hostname or IP of the display |
+| `source_name` | this Mac's local hostname | This Mac's name on the display, when [several Macs share it](#one-display-several-macs) |
 | `plan_usage` | `false` | Fetch 5-hour/weekly plan usage (see [step 6](#6-optional-turn-on-plan-usage-rings)) |
 | `plan_usage_interval` | `300` | Seconds between plan usage checks |
 | `push_interval` | `1.0` | How often (seconds) the helper checks for changes |
@@ -762,7 +781,7 @@ It's your Claude activity, so here's exactly what this project touches:
 
 - **Hooks** send event data (session ID, tool name and tool input such as the command being run) **only to `127.0.0.1`**, the helper on your own Mac.
 - **The helper reads** `~/.claude/sessions/` (session names and busy/idle state) and your transcript files in `~/.claude/projects/` (token counts and prompt *counts* only; it doesn't keep your messages).
-- **The display receives** session names, short details such as `Bash: npm test`, counts and usage percentages, your night mode hours and your Mac's clock, over your local Wi-Fi.
+- **The display receives** your Mac's local hostname, session names, short details such as `Bash: npm test`, counts and usage percentages, your night mode hours and your Mac's clock, over your local Wi-Fi.
 - **The helper's local API**, which the hooks, the chat connector and the menu bar app use, only listens on `127.0.0.1`, so nothing else on your network can reach it. It also turns away requests from web pages: it refuses any request with an `Origin` header, which browsers add, or with a `Host` other than `127.0.0.1` or `localhost`, which stops a website pointing its own name at your Mac (DNS rebinding). It never hands out the display's pairing key or your Claude sign-in.
 - **Chat alerts:** the helper reads the Claude app's chat-window log (`~/Library/Logs/Claude/claude.ai-web.log`), but only the tool approval lines, which contain a tool name. The connector sends the short question and chat title Claude gives it to the helper on `127.0.0.1`, and from there to the display.
 - **Reply checks:** when a Claude Code turn ends without an obvious question, the last 3,000 characters of Claude's reply are sent to Claude Haiku, through your own `claude` sign-in, to ask whether it's waiting on you. Turn this off with `"check_replies": false`.
