@@ -892,7 +892,7 @@ python3 designs.py        # writes designs/*.stl and prints fit, stability and o
 │           ├── night.cpp / .h       # night mode: when the screen goes dark, and how bright it is
 │           └── secrets.h.example
 ├── tools/build-release.sh           # builds dist/: firmware, Mac zip with the menu bar app, installer page
-├── .github/workflows/release.yml    # on a v* tag: build, publish release + installer page
+├── .github/workflows/release.yml    # on a merge to main or a v* tag: build, publish release + installer page
 ├── stand/                           # 3D-printable desk stands
 │   ├── make_stand.py                # shared ring + design 9 -> designs/9-automotive.stl
 │   ├── designs.py                   # designs 1-8 -> designs/*.stl

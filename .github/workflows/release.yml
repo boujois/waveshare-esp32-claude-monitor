@@ -1,16 +1,27 @@
 # Builds the firmware and Mac installer, attaches them to a GitHub release,
 # and publishes the browser installer page to GitHub Pages.
 #
-# Release: push a version tag, e.g.  git tag v1.0.0 && git push origin v1.0.0
+# Release: every merge to main is released as the next minor version (v1.8.0 -> v1.9.0).
+#   Label the pull request "release: patch" (v1.8.1) or "release: major" (v2.0.0) to bump
+#   differently, or "no release" to skip. Merges that only change Markdown files aren't released.
+#   Pushing a version tag also releases, e.g.  git tag v1.0.0 && git push origin v1.0.0
 # Pull requests: build only, as a check (nothing is published)
 # Manual run (Actions tab > Release > Run workflow): build + republish the installer page
 name: Release
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+    # Only applies to main: path filters aren't evaluated for tag pushes
+    paths-ignore: ["**.md"]
   pull_request:
   workflow_dispatch:
+
+# One release at a time, so two quick merges can't pick the same version
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: write
@@ -21,8 +32,45 @@ jobs:
   build:
     # macOS for Swift: the Mac package includes the menu bar app
     runs-on: macos-latest
+    outputs:
+      publish: ${{ steps.version.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
+
+      # version: what the build reports, e.g. v1.9.0 (dev-<sha> when not releasing)
+      # release: "true" to create a GitHub release; publish: "true" to update the installer page
+      - name: Pick the version
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="dev-$GITHUB_SHA" release=false
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="$GITHUB_REF_NAME" release=true
+          elif [ "$GITHUB_EVENT_NAME" = push ]; then
+            labels=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" --jq '.[0].labels[].name' 2>/dev/null || true)
+            tags=$(git ls-remote --tags origin 'v*')
+            if printf '%s\n' "$labels" | grep -qix 'no release'; then
+              echo "The pull request is labelled \"no release\""
+            elif printf '%s\n' "$tags" | grep -q "^$GITHUB_SHA"; then
+              echo "This commit is already tagged, so it's released by the tag"
+            else
+              last=$(printf '%s\n' "$tags" | sed -n 's#.*refs/tags/v\([0-9]*\.[0-9]*\.[0-9]*\)$#\1#p' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+              IFS=. read -r major minor patch <<< "${last:-0.0.0}"
+              if printf '%s\n' "$labels" | grep -qix 'release: major'; then
+                version="v$((major + 1)).0.0"
+              elif printf '%s\n' "$labels" | grep -qix 'release: patch'; then
+                version="v$major.$minor.$((patch + 1))"
+              else
+                version="v$major.$((minor + 1)).0"
+              fi
+              release=true
+              echo "Releasing $version (last release: v${last:-none})"
+            fi
+          fi
+          publish=$release
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] && publish=true
+          { echo "version=$version"; echo "release=$release"; echo "publish=$publish"; } >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-python@v5
         with:
@@ -38,7 +86,7 @@ jobs:
         run: pip install platformio "esptool<5"
 
       - name: Build release files
-        run: tools/build-release.sh "${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}"
+        run: tools/build-release.sh "${{ steps.version.outputs.version }}"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -46,15 +94,17 @@ jobs:
           path: dist/
 
       - name: Create GitHub release
-        if: github.ref_type == 'tag'
+        if: steps.version.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+        # Creates the tag on this commit when it doesn't exist yet; the merged pull requests are
+        # listed after the install notes
         run: |
-          gh release create "${{ github.ref_name }}" \
+          gh release create "${{ steps.version.outputs.version }}" --target "$GITHUB_SHA" --generate-notes \
             dist/Claude-Monitor-Mac.zip dist/claude-monitor-firmware.bin dist/claude-monitor-app.bin \
             dist/claude-monitor-firmware-waveshare-s3-touch-lcd128.bin dist/claude-monitor-app-waveshare-s3-touch-lcd128.bin \
             dist/claude-monitor-firmware-lilygo-t-rgb.bin dist/claude-monitor-app-lilygo-t-rgb.bin \
-            --title "Claude Monitor ${{ github.ref_name }}" \
+            --title "Claude Monitor ${{ steps.version.outputs.version }}" \
             --notes-file - <<'EOF'
           ## Install
 
@@ -71,13 +121,13 @@ jobs:
           EOF
 
       - uses: actions/upload-pages-artifact@v3
-        if: github.event_name != 'pull_request'
+        if: steps.version.outputs.publish == 'true'
         with:
           path: dist/web
 
   pages:
     needs: build
-    if: github.event_name != 'pull_request'
+    if: needs.build.outputs.publish == 'true'
     runs-on: ubuntu-latest
     # Pages may not be available (e.g. private repo on a free plan); don't fail the release over it
     continue-on-error: true
