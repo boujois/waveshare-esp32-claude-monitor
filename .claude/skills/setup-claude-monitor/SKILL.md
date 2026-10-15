@@ -82,6 +82,7 @@ PlatformIO auto-detects the port; if several boards are plugged in, add `upload_
    - **The log says `Wi-Fi setup open`:** it's waiting for phone setup. A wrong password reopens setup. Check the network is 2.4 GHz.
    - **Flashing fails:** close anything else holding the serial port (a serial monitor, the Arduino IDE), then retry.
 3. Check the Mac can reach it with `curl -s http://claude-status.local/`. If the name doesn't resolve, use the IP from the log, and remember it for step 4.
+   - **Wi-Fi can't be made to work** (the router won't let the display join, or the Mac and display end up on different networks): leave the display plugged into the Mac with the data cable and carry on with step 4. The helper falls back to USB by itself and logs `pushing over USB (…)`; see the README's "Without Wi-Fi" section. Screenshots (`/screen.bmp`) need Wi-Fi, so ask the person what the screen shows instead.
 
 The screen should now say **"Waiting for Mac"**. You can see exactly what's on the screen with `curl -s http://claude-status.local/screen.bmp -o /tmp/screen.bmp` and then reading the image. Use this whenever you want to verify the display yourself instead of asking the person.
 

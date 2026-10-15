@@ -427,6 +427,10 @@ static String pairKey;           // shared with the Mac helper; required for fir
 static bool showCat = true;      // the cat and its power-on walk ("cat" in the helper's config.json)
 static NightMode nightMode;      // from the helper's config.json, remembered across reboots
 static int brightness = -1;      // the backlight now
+static uint32_t usbHeardAt = 0;  // when the Mac last sent its state over USB (see pollSerial())
+
+// The Mac is sending over the USB cable, because it can't reach the display over Wi-Fi
+static bool usbLink() { return usbHeardAt && millis() - usbHeardAt < STALE_MS; }
 
 static void setBacklight(int level) {
   if (level != brightness) lcd.setBrightness(brightness = level);
@@ -451,7 +455,7 @@ static String describeNight(const NightMode &n) {
          (n.alerts ? "on" : "off");
 }
 
-static void replyWithCard(JsonDocument &reply);
+static String cardReply(JsonDocument &reply);
 
 static bool sourceStale(const Source &x, uint32_t now) { return now - x.state.rxMillis > STALE_MS; }
 
@@ -536,12 +540,10 @@ static void mergeSources() {
   st = std::move(m);
 }
 
-static void handleState() {
+// The Mac's state, from POST /state or a "@state" line over USB. Returns the reply, or "" for bad JSON.
+static String applyState(const String &body) {
   JsonDocument doc;
-  if (deserializeJson(doc, server.arg("plain"))) {
-    server.send(400, "text/plain", "bad json");
-    return;
-  }
+  if (deserializeJson(doc, body)) return "";
   String src = (const char *)(doc["source"] | "");
   State s;
   s.valid = true;
@@ -606,8 +608,7 @@ static void handleState() {
   if (!settingsSource(from)) {  // another Mac's settings apply (see settingsSource())
     JsonDocument reply;
     reply["ok"] = true;
-    replyWithCard(reply);
-    return;
+    return cardReply(reply);
   }
 
   // The Mac helper sends its timezone as a POSIX TZ string; remember it across reboots
@@ -646,7 +647,13 @@ static void handleState() {
   nightMode = n;
   JsonDocument reply;
   reply["ok"] = true;
-  replyWithCard(reply);
+  return cardReply(reply);
+}
+
+static void handleState() {
+  String reply = applyState(server.arg("plain"));
+  if (reply.length()) server.send(200, "application/json", reply);
+  else server.send(400, "text/plain", "bad json");
 }
 
 #ifdef BOARD_LILYGO_T_RGB
@@ -1071,6 +1078,19 @@ static void paceTick(int r0, int r1, float gone) {
   frame.drawWedgeLine(CX + (r0 - 2) * c, CY + (r0 - 2) * s, CX + (r1 + 2) * c, CY + (r1 + 2) * s, 1.2f, 1.2f, COL_TEXT);
 }
 
+// The USB symbol (a trident), centred on x, y and about 16 pixels tall: shown beside the clock
+// while the Mac is sending over the USB cable
+static void drawUsbIcon(int x, int y, uint32_t col) {
+  frame.drawWideLine(x, y - 5, x, y + 5, 0.8f, col);              // stem
+  frame.fillTriangle(x, y - 8, x - 3, y - 4, x + 3, y - 4, col);  // arrowhead
+  frame.fillCircle(x, y + 6, 2, col);                             // base
+  frame.drawWideLine(x, y + 2, x - 4, y - 1, 0.8f, col);          // left branch, to a dot
+  frame.drawWideLine(x - 4, y - 1, x - 4, y - 2, 0.8f, col);
+  frame.fillCircle(x - 4, y - 3, 1, col);
+  frame.drawWideLine(x, y + 0, x + 4, y - 2, 0.8f, col);          // right branch, to a square
+  frame.fillRect(x + 3, y - 5, 3, 3, col);
+}
+
 // The status screen for a state: the merged one, or with mac set, one Mac's own (a page you swipe
 // to). The parameter is named st on purpose, so it stands in for the global in what follows.
 static void drawStatus(const State &st, bool stale, const String *mac = nullptr) {
@@ -1102,6 +1122,7 @@ static void drawStatus(const State &st, bool stale, const String *mac = nullptr)
     text(fit(mac->length() ? *mac : String("Mac"), chordWidth(43, STATUS_TEXT_R)), CX, 43, COL_TEXT,
          &fonts::FreeSansBold9pt7b);
   }
+  if (!mac && live && usbLink()) drawUsbIcon(CX + 36, 43, COL_DIM);  // beside the time
 
   // Pace ticks: usage past its tick will run out before the window resets
   if (usage) {
@@ -1239,7 +1260,8 @@ static void drawDiagnostics(uint32_t shownMs) {
   infoLine("Signal", online ? String(rssi) + " dBm, " + (rssi >= -67 ? "good" : rssi >= -80 ? "fair" : "weak") : String("-"), 104);
   infoLine("IP", online ? WiFi.localIP().toString() : String("-"), 124);
   infoLine("Name", String(HOSTNAME) + ".local", 144);
-  infoLine("Mac", heard < 0 ? String("not seen yet") : heard == 0 ? String("seen just now") : "seen " + duration(heard) + " ago", 164);
+  String via = usbLink() ? String(" (USB)") : String();
+  infoLine("Mac", heard < 0 ? String("not seen yet") : heard == 0 ? "seen just now" + via : "seen " + duration(heard) + " ago" + via, 164);
   infoLine("Uptime", duration(esp_timer_get_time() / 1000000), 184);
 }
 
@@ -1270,7 +1292,7 @@ static bool authorized() {
   return pairKey.length() && server.header("X-Claude-Monitor-Key") == pairKey;
 }
 
-static void handleInfo() {
+static String infoJson() {
   JsonDocument d;
   d["version"] = FW_VERSION;
   d["board"] = BOARD_NAME;
@@ -1284,27 +1306,37 @@ static void handleInfo() {
   n["alerts"] = nightMode.alerts;
   n["active"] = nightActive(nightMode, time(nullptr));
   d["brightness"] = brightness;
+  d["usb"] = usbLink();
   String out;
   serializeJson(d, out);
-  server.send(200, "application/json", out);
+  return out;
 }
 
+static void handleInfo() { server.send(200, "application/json", infoJson()); }
+
 // The first Mac to pair owns the display; power on 3 times in a row to clear it.
-static void handlePair() {
-  String key = server.arg("plain");
+// Returns the HTTP status, with the message to send in msg.
+static int applyPair(String key, String &msg) {
   key.trim();
   if (pairKey.length()) {
-    server.send(403, "text/plain", "Already paired. Power the display on 3 times in a row to reset pairing.\n");
-    return;
+    msg = "Already paired. Power the display on 3 times in a row to reset pairing.\n";
+    return 403;
   }
   if (key.length() < 16) {
-    server.send(400, "text/plain", "Key too short\n");
-    return;
+    msg = "Key too short\n";
+    return 400;
   }
   pairKey = key;
   prefs.putString("key", key);
-  server.send(200, "text/plain", "Paired\n");
   Serial.println("Paired with a Mac");
+  msg = "Paired\n";
+  return 200;
+}
+
+static void handlePair() {
+  String msg;
+  int code = applyPair(server.arg("plain"), msg);
+  server.send(code, "text/plain", msg);
 }
 
 static void drawUpdateProgress(int pct) {
@@ -1458,7 +1490,7 @@ static void dismissCard(const Pick &card) {
 
 // Answers the Mac with the card on screen, so its menu bar app can offer to dismiss it: "card" is
 // null for the status screen. "icon" is the symbol in the circle at the top of the card.
-static void replyWithCard(JsonDocument &reply) {
+static String cardReply(JsonDocument &reply) {
   Pick card = currentCard();
   String key = cardKey(card);
   if (key.length()) {
@@ -1491,18 +1523,15 @@ static void replyWithCard(JsonDocument &reply) {
   o["tap"] = TAP_TO_OPEN;  // whether a tap on the display can ask (so the Mac checks in more often)
   String out;
   serializeJson(reply, out);
-  server.send(200, "application/json", out);
+  return out;
 }
 
 // Dismiss in the Mac's menu bar app: like a double tap, but with {"key": ...} only if that card is
-// still on screen, so one that's changed since the Mac last heard isn't dismissed by mistake
-static void handleDismiss() {
+// still on screen, so one that's changed since the Mac last heard isn't dismissed by mistake.
+// Returns the reply, or "" for bad JSON.
+static String applyDismiss(const String &raw) {
   JsonDocument body;
-  String raw = server.arg("plain");
-  if (raw.length() && deserializeJson(body, raw)) {
-    server.send(400, "text/plain", "bad json");
-    return;
-  }
+  if (raw.length() && deserializeJson(body, raw)) return "";
   Pick card = currentCard();
   String key = cardKey(card);
   bool dismiss = key.length() && (body["key"].isNull() || key == (const char *)(body["key"] | ""));
@@ -1512,7 +1541,65 @@ static void handleDismiss() {
   }
   JsonDocument reply;
   reply["dismissed"] = dismiss;
-  replyWithCard(reply);
+  return cardReply(reply);
+}
+
+static void handleDismiss() {
+  String reply = applyDismiss(server.arg("plain"));
+  if (reply.length()) server.send(200, "application/json", reply);
+  else server.send(400, "text/plain", "bad json");
+}
+
+// ---- The Mac over USB ----
+
+// When the Mac can't reach the display over Wi-Fi, its helper sends the same requests down the USB
+// cable instead, one per line: "@state {...}", "@dismiss {...}", "@info" or "@pair <key>". Each gets
+// one "@reply <code> <body>" line back. Everything else on the serial port is the log, which never
+// starts with "@", so the helper can tell the replies apart.
+static void handleSerialLine(const String &line) {
+  int sp = line.indexOf(' ');
+  String cmd = sp < 0 ? line : line.substring(0, sp);
+  String arg = sp < 0 ? String() : line.substring(sp + 1);
+  int code = 200;
+  String reply;
+  if (cmd == "@state") {
+    reply = applyState(arg);
+    if (reply.length()) usbHeardAt = millis() | 1;
+  } else if (cmd == "@dismiss") {
+    reply = applyDismiss(arg);
+  } else if (cmd == "@info") {
+    reply = infoJson();
+  } else if (cmd == "@pair") {
+    code = applyPair(arg, reply);
+    reply.trim();
+  } else {
+    code = 404;
+    reply = "unknown request";
+  }
+  if (!reply.length()) {
+    code = 400;
+    reply = "bad json";
+  }
+  Serial.printf("@reply %d %s\n", code, reply.c_str());
+}
+
+// Reads whatever has arrived over USB, handling each complete line
+static void pollSerial() {
+  static String line;
+  static bool overflow = false;  // a line too long to be a request: skipped to its end
+  while (Serial.available()) {
+    char ch = Serial.read();
+    if (ch == '\n') {
+      line.trim();
+      if (!overflow && line.startsWith("@")) handleSerialLine(line);
+      line = "";
+      overflow = false;
+    } else if (line.length() < 16384) {
+      line += ch;
+    } else {
+      overflow = true;
+    }
+  }
 }
 
 // ---- Setup / loop ----
@@ -1531,6 +1618,7 @@ static void catWalk() {
 }
 
 void setup() {
+  Serial.setRxBufferSize(8192);  // room for a whole state from the Mac between frames (pollSerial())
   Serial.begin(115200);
   pinMode(PIN_BOOT, INPUT_PULLUP);
 
@@ -1683,9 +1771,12 @@ void loop() {
   bool connected = WiFi.status() == WL_CONNECTED;
   updatePowerCycleWindow();
 
+  pollSerial();
+
   if (wifiManager.getConfigPortalActive()) {
     wifiManager.process();
-    if (!connected) {
+    // The Mac's state arriving over USB shows instead of the setup screen; setup stays open meanwhile
+    if (!connected && !usbLink()) {
       // Scan for networks once, in the background, before anyone has joined (see setup())
       static uint32_t scanTriedAt = 0;
       static bool scanStarted = false;
@@ -1705,7 +1796,7 @@ void loop() {
       delay(2);
       return;
     }
-    wifiManager.stopConfigPortal();  // joined a network: close the setup network
+    if (connected) wifiManager.stopConfigPortal();  // joined a network: close the setup network
   }
 
   if (connected && !wasConnected) {

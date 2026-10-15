@@ -34,6 +34,7 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
   - [Option 2: One line in Terminal (no coding)](#option-2-one-line-in-terminal-no-coding)
   - [Option 3: Build it yourself, step by step](#option-3-build-it-yourself-step-by-step)
 - [The menu bar app](#the-menu-bar-app)
+- [Without Wi-Fi: over the USB cable](#without-wi-fi-over-the-usb-cable)
 - [Using a LilyGO T-RGB](#using-a-lilygo-t-rgb)
 - [One display, several Macs](#one-display-several-macs)
 - [Updating](#updating)
@@ -119,6 +120,7 @@ flowchart LR
     G["GitHub CI checks<br/>(via gh, optional)"] --> B
     SP["Anthropic status page<br/>(incidents)"] --> B
     B -- "POST /state over Wi-Fi<br/>(every second when changed)" --> D["Round display<br/>claude-status.local"]
+    B -. "the same over USB<br/>(when Wi-Fi can't reach it)" .-> D
 ```
 
 There are three main moving parts, plus an extra for chats and the menu bar app for options:
@@ -130,7 +132,7 @@ There are three main moving parts, plus an extra for chats and the menu bar app 
    - **your transcripts**, for today's token and prompt totals
 
    If you turn it on, it also checks your plan usage with Anthropic. If the GitHub CLI is signed in, it asks GitHub about the checks on the pull request for the session you have open in the Claude app. Every 2 minutes it checks Anthropic's status page for incidents. It pushes the summary to the display whenever something changes, plus a heartbeat every 10 seconds.
-3. **The display firmware** (`claude-status/firmware/`) joins your Wi-Fi and announces itself as `claude-status.local`. It accepts the summary on `POST /state` and draws the right screen at about 30 fps. It runs [night mode](#night-mode) by itself, so that keeps working while your Mac sleeps.
+3. **The display firmware** (`claude-status/firmware/`) joins your Wi-Fi and announces itself as `claude-status.local`. It accepts the summary on `POST /state`, or over its USB cable when Wi-Fi can't reach it (see [Without Wi-Fi](#without-wi-fi-over-the-usb-cable)), and draws the right screen at about 30 fps. It runs [night mode](#night-mode) by itself, so that keeps working while your Mac sleeps.
 4. **Chats in the Claude app** don't have hooks, so the helper uses two other signals. It watches the app's chat-window log for **tool approval prompts**. A tiny local **connector** (`chat_mcp.py`) also gives Claude a `waiting_for_user` tool, which it calls when a reply ends with a question for you.
 5. **The [menu bar app](#the-menu-bar-app)** (`claude-status/menubar/`) shows what the helper is up to and changes its settings, over the same local port. The settings themselves live in the helper.
 
@@ -397,6 +399,16 @@ The installer puts the app in `~/Applications` and starts it when you log in. **
 
 ---
 
+## Without Wi-Fi: over the USB cable
+
+If the display is plugged into your Mac with a data USB cable, it keeps working when Wi-Fi doesn't: a new network, a router that won't let the display join, or the Mac and the display ending up on different networks. Whenever the helper can't reach the display over Wi-Fi, it sends the same updates down the USB cable instead, and the display shows them in place of its Wi-Fi setup screen. Alerts, Done cards, dismissing from the menu bar app and night mode all work the same.
+
+There's nothing to set up. The helper finds the display among your USB devices by its USB-serial chip, so other serial devices are left alone. Every minute it checks whether Wi-Fi reaches the display again, and switches back when it does. A small USB symbol shows beside the clock on the status screen, the menu bar app says **Display connected over USB**, the helper's log says `pushing over USB (/dev/cu.usbmodem…)`, and the five-tap diagnostics show `(USB)` after when the Mac was last seen.
+
+A few things still need Wi-Fi: firmware updates from the Mac (the helper updates itself as usual), the screenshot at `/screen.bmp`, and the other HTTP endpoints. To turn the fallback off, set `"usb_fallback": false` in [`config.json`](#mac-helper-configjson).
+
+> The helper leaves the cable alone while `esptool` (or `pio run -t upload`) is flashing the display. If the helper is already using the cable when you start, the flash stops with an error saying the port is busy: stop the helper first, `launchctl bootout gui/$(id -u)/com.claude-status.bridge`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-status.bridge.plist` afterwards.
+
 ## Using a LilyGO T-RGB
 
 The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. The T-RGB has no motion sensor, so the case taps are **taps on the screen** instead: tap a card once to [jump to its session](#jump-to-the-session) on your Mac, double-tap to dismiss it, or tap 5 times for diagnostics. The **BOOT** button works as described above.
@@ -639,6 +651,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | `night_end` | `"07:00"` | When night ends. Earlier than `night_start` runs past midnight; the two can't be the same |
 | `night_screen` | `"off"` | `"off"` turns the screen off at night; `"dim"` keeps it very dim |
 | `night_alerts` | `true` | A session that needs you still lights the screen at night |
+| `usb_fallback` | `true` | Send updates over the display's USB cable when Wi-Fi can't reach it (see [Without Wi-Fi](#without-wi-fi-over-the-usb-cable)) |
 | `listen_port` | `47823` | Local port for hooks, the chat connector and the menu bar app. If you change it, also update the URL in `hooks.py` and `chat_mcp.py`, then re-run `install.sh`, which passes the new port to the menu bar app |
 
 ### Firmware: top of `claude-status/firmware/src/main.cpp`
@@ -666,6 +679,7 @@ Re-flash after changing anything with `pio run -t upload`.
 2. Check its log: `tail -20 ~/Library/Logs/claude-status-bridge.log`. Look for `pushing to claude-status.local (192.168.x.x)`.
 3. If it says `cannot resolve claude-status.local`, mDNS isn't getting through your network. Set `"device_host"` in `config.json` to the IP address shown on the display. A DHCP reservation in your router keeps that IP from changing.
 4. Make sure your Mac and the display are on the same network. Guest networks often block devices from seeing each other.
+5. Or skip Wi-Fi: plug the display into the Mac with a data USB cable, and the helper uses that instead (see [Without Wi-Fi](#without-wi-fi-over-the-usb-cable)). It needs firmware and a helper from a release with USB support.
 </details>
 
 <details>

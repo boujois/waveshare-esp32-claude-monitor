@@ -2,7 +2,7 @@
 """Claude Code status bridge.
 
 Collects Claude Code state on this Mac and pushes a compact summary to the
-ESP32 status display over Wi-Fi:
+ESP32 status display over Wi-Fi, or over its USB cable when Wi-Fi can't reach it:
 
   * live sessions          ~/.claude/sessions/<pid>.json (name, busy/idle)
   * "needs your input"     hook events POSTed to http://127.0.0.1:47823/hook
@@ -22,15 +22,18 @@ Standard library only. Run directly or via the launchd agent (see install.sh).
 """
 
 import argparse
+import fcntl
 import json
 import os
 import re
 import secrets
 import shutil
 import stat
+import select
 import tempfile
 import socket
 import subprocess
+import termios
 import threading
 import time
 import unicodedata
@@ -77,6 +80,8 @@ DEFAULT_CONFIG = {
     "night_end": "07:00",
     "night_screen": "off",
     "night_alerts": True,
+    # When the display can't be reached over Wi-Fi, talk to it over its USB cable instead
+    "usb_fallback": True,
 }
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -1431,13 +1436,130 @@ def device_key(cfg):
     return cfg["device_key"]
 
 
+# USB-serial chips the supported boards use: WCH (the Waveshare boards' CH343) and Espressif's own
+USB_VENDORS = {0x1A86, 0x303A}
+
+
+def usb_serial_ports():
+    """Serial ports of USB devices from USB_VENDORS, e.g. ["/dev/cu.usbmodem5B910464691"]."""
+    try:
+        out = subprocess.run(["ioreg", "-r", "-c", "IOUSBHostDevice", "-l", "-w0"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    # A device's own properties come before those of the devices plugged into it, so a port
+    # belongs to the vendor listed last before it
+    ports, vendor = [], None
+    for line in out.splitlines():
+        m = re.search(r'"idVendor" = (\d+)', line)
+        if m:
+            vendor = int(m.group(1))
+            continue
+        m = re.search(r'"IOCalloutDevice" = "([^"]+)"', line)
+        if m and vendor in USB_VENDORS:
+            ports.append(m.group(1))
+    return ports
+
+
+class UsbLink:
+    """The display over its USB cable. Requests go one per line ("@state {...}", "@info", ...)
+    and each gets one "@reply <code> <body>" line back; every other line is the display's log.
+    The port is only opened when it's needed, and stays open while it's in use."""
+
+    SCAN_INTERVAL = 10  # seconds between looks for a display when none is plugged in
+
+    def __init__(self):
+        self.fd = None
+        self.port = None
+        self.lock = threading.Lock()
+        self._next_scan = 0
+
+    def close(self):
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd = None
+
+    def _open(self):
+        if self.fd is not None:
+            return True
+        now = time.monotonic()
+        if now < self._next_scan:
+            return False
+        self._next_scan = now + self.SCAN_INTERVAL
+        for port in usb_serial_ports():
+            try:
+                fd = os.open(port, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            except OSError:
+                continue
+            try:
+                # The same lock esptool takes while flashing, so neither gets in the other's way
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                continue
+            try:
+                # Raw 115200 8N1. Opening leaves DTR and RTS both on, which doesn't reset the board
+                # (its auto-reset circuit needs them to differ).
+                cc = termios.tcgetattr(fd)[6]
+                cc[termios.VMIN], cc[termios.VTIME] = 0, 0
+                cflag = termios.CS8 | termios.CREAD | termios.CLOCAL
+                termios.tcsetattr(fd, termios.TCSANOW, [0, 0, cflag, 0, termios.B115200, termios.B115200, cc])
+                fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)  # blocking writes
+            except (OSError, termios.error):
+                os.close(fd)
+                continue
+            self.fd, self.port = fd, port
+            return True
+        return False
+
+    def request(self, cmd, body=b"", timeout=3):
+        """Sends one request and returns (code, reply body). Raises OSError when there's no
+        display on USB or it doesn't answer."""
+        with self.lock:
+            if not self._open():
+                raise OSError("no display on USB")
+            try:
+                termios.tcflush(self.fd, termios.TCIFLUSH)  # anything left from an earlier request
+                data = cmd.encode() + (b" " + body if body else b"") + b"\n"
+                while data:
+                    data = data[os.write(self.fd, data):]
+                buf, deadline = b"", time.monotonic() + timeout
+                while True:
+                    left = deadline - time.monotonic()
+                    if left <= 0:
+                        raise TimeoutError(f"no reply over USB ({self.port})")
+                    if select.select([self.fd], [], [], left)[0]:
+                        chunk = os.read(self.fd, 4096)
+                        if not chunk:
+                            raise OSError("the USB port closed")
+                        buf += chunk
+                    while b"\n" in buf:
+                        line, buf = buf.split(b"\n", 1)
+                        if line.startswith(b"@reply "):
+                            parts = line.rstrip(b"\r").split(b" ", 2)
+                            return int(parts[1]), parts[2] if len(parts) > 2 else b""
+            except (OSError, termios.error, ValueError) as e:
+                self.close()  # unplugged, or not our firmware: look again later
+                raise OSError(str(e)) from None
+
+
 class Device:
-    def __init__(self, host, source=""):
+    WIFI_RETRY = 60  # while on USB, how often to check whether Wi-Fi reaches the display again
+
+    def __init__(self, host, source="", usb=True):
         self.host = host
         self.source = source  # this Mac's name on the display (see source_name())
         self.ip = None
         self.ok = None  # whether the last push got through; None before the first
         self.last_push = 0  # when a push last got through
+        self.usb = UsbLink() if usb else None
+        self.via = "wifi"  # how requests go: "wifi", or "usb" while Wi-Fi can't reach the display
+        self._wifi_back = threading.Event()  # set by the Wi-Fi check while on USB
+        self._next_wifi_check = 0
+        self._link = None  # (ok, via) last logged
         # The card on the display's screen ({"key", "icon", "title", "name"}) or None, from its
         # replies to pushes and dismissals. Firmware from before Dismiss in the menu bar app never says.
         self.card = None
@@ -1482,6 +1604,67 @@ class Device:
         return self.ip
 
     def push(self, payload):
+        if self.via == "usb":
+            if self._wifi_back.is_set():
+                self._use_wifi()
+            elif self._push_usb(payload):
+                self._check_wifi_soon()
+                return True
+            else:
+                self.via = "wifi"  # unplugged: back to Wi-Fi, if it works
+        if self._push_wifi(payload):
+            return True
+        if self.usb and self._push_usb(payload):
+            self.via = "usb"
+            self._next_wifi_check = time.monotonic() + self.WIFI_RETRY
+            return True
+        return False
+
+    def _use_wifi(self):
+        self.via = "wifi"
+        self._wifi_back.clear()
+        self.usb.close()  # free the port, e.g. for flashing
+
+    def _check_wifi_soon(self):
+        """While on USB: every so often, check in the background whether Wi-Fi reaches the
+        display again, so the next push can go back to it."""
+        now = time.monotonic()
+        if now < self._next_wifi_check:
+            return
+        self._next_wifi_check = now + self.WIFI_RETRY
+
+        def check():
+            try:
+                self._resolve()
+                with urllib.request.urlopen(self._url("/info"), timeout=3) as r:
+                    r.read()
+                self._wifi_back.set()
+            except OSError:
+                pass
+        threading.Thread(target=check, daemon=True).start()
+
+    def _push_usb(self, payload):
+        asked = time.monotonic()
+        try:
+            code, reply = self.usb.request("@state", payload)
+        except OSError as e:
+            if self.via == "usb":
+                self._got_card(asked, None)
+                self._set_ok(False, f"push over USB failed: {e}")
+            return False
+        if code != 200:
+            self._set_ok(False, f"push over USB failed: HTTP {code}")
+            return False
+        self.last_push = time.time()
+        self.via = "usb"
+        self._set_ok(True, f"pushing over USB ({self.usb.port}): the display isn't reachable over Wi-Fi")
+        try:
+            self._got_card(asked, json.loads(reply))
+        except ValueError:
+            self._got_card(asked, None)
+        return True
+
+    def _push_wifi(self, payload):
         if not self.ip and not self._resolve():
             self._set_ok(False, f"cannot resolve {self.host}")
             return False
@@ -1505,9 +1688,17 @@ class Device:
         return True
 
     def _set_ok(self, ok, msg):
-        if ok != self.ok:
+        if (ok, self.via) != self._link:
             log(msg)
+        self._link = (ok, self.via)
         self.ok = ok
+
+    def _usb_request(self, path, cmd, body=b""):
+        """A request over USB, raising HTTPError for a refusal like urllib does over Wi-Fi."""
+        code, reply = self.usb.request(cmd, body)
+        if code != 200:
+            raise urllib.error.HTTPError(f"usb:{path}", code, reply.decode(errors="replace"), None, None)
+        return reply
 
     def _url(self, path):
         if not self.ip and not self._resolve():
@@ -1517,10 +1708,15 @@ class Device:
     def info(self):
         """{"version", "board", "paired", "ip", ...} from the display (firmware with Wi-Fi updates only;
         "board" since it came in more than one)."""
+        if self.via == "usb":
+            return json.loads(self._usb_request("/info", "@info"))
         with urllib.request.urlopen(self._url("/info"), timeout=5) as r:
             return json.load(r)
 
     def pair(self, key):
+        if self.via == "usb":
+            self._usb_request("/pair", "@pair", key.encode())
+            return
         req = urllib.request.Request(self._url("/pair"), data=key.encode(), method="POST",
                                      headers={"Content-Type": "text/plain"})  # form encoding would hide it
         with urllib.request.urlopen(req, timeout=5) as r:
@@ -1529,6 +1725,11 @@ class Device:
     def dismiss(self, key):
         """Dismisses the card on the display's screen, like a double tap, if it's still the one
         with this key. Returns whether it was; self.card then holds the card on screen now."""
+        if self.via == "usb":
+            asked = time.monotonic()
+            reply = json.loads(self._usb_request("/dismiss", "@dismiss", json.dumps({"key": key}).encode()))
+            self._got_card(asked, reply)
+            return reply.get("dismissed") is True if isinstance(reply, dict) else False
         req = urllib.request.Request(self._url("/dismiss"), data=json.dumps({"key": key}).encode(),
                                      headers={"Content-Type": "application/json"}, method="POST")
         asked = time.monotonic()
@@ -1539,7 +1740,9 @@ class Device:
 
     def push_firmware(self, key, data):
         """Sends a firmware image (the app part, e.g. firmware.bin) to the display, which
-        writes it to its spare slot and restarts into it."""
+        writes it to its spare slot and restarts into it. Wi-Fi only."""
+        if self.via == "usb":
+            raise OSError("the display is only reachable over USB; firmware updates need Wi-Fi")
         boundary = "claude-monitor-" + secrets.token_hex(8)
         body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"firmware\"; filename=\"firmware.bin\"\r\n"
                 f"Content-Type: application/octet-stream\r\n\r\n").encode() + data + f"\r\n--{boundary}--\r\n".encode()
@@ -1774,7 +1977,7 @@ class Bridge:
         self.focus = FocusWatcher()
         self.usage = UsageWatcher(cfg["plan_usage_interval"], s["plan_usage"], background=not once)
         self.chats = self.ci = self.incidents = None
-        self.device = Device(cfg["device_host"], source_name(cfg))
+        self.device = Device(cfg["device_host"], source_name(cfg), usb=cfg["usb_fallback"])
         self.tz = posix_timezone()
         self.key = device_key(cfg)
         self.release = {"tag": None, "assets": None, "next": 0}
@@ -1887,7 +2090,7 @@ class Bridge:
             "helper_dir": str(HELPER_DIR),
             "log_path": str(LOG_PATH),
             "claude_cli": claude_cli(),
-            "display": {"host": self.device.host, "reachable": self.device.ok,
+            "display": {"host": self.device.host, "reachable": self.device.ok, "link": self.device.via,
                         "version": self.display["version"], "board": self.display["board"],
                         "last_push": int(self.device.last_push),
                         "night_mode": self.display["night"], "card": self.device.card},
