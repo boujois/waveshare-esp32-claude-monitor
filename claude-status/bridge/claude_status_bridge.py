@@ -15,7 +15,8 @@ ESP32 status display over Wi-Fi, or over its USB cable when Wi-Fi can't reach it
 The Claude Monitor menu bar app changes these options while the helper runs, through
 GET/POST /settings, POST /usage/connect and POST /usage/refresh on the same port.
 Changes are saved to config.json and take effect within a second, without a restart.
-It can also dismiss the card on the display's screen (POST /display/dismiss).
+It can also dismiss the card on the display's screen (POST /display/dismiss), and bring the app
+running its session to the front (POST /display/open, or a tap on a touch screen's card).
 
 Standard library only. Run directly or via the launchd agent (see install.sh).
 """
@@ -49,6 +50,9 @@ CONFIG_PATH = Path(__file__).with_name("config.json")
 
 DEFAULT_CONFIG = {
     "device_host": "claude-status.local",
+    # This Mac's name on the display, which can show several Macs at once; default: its local
+    # hostname (System Settings > General > Sharing). Each Mac sharing a display needs its own.
+    "source_name": None,
     "listen_port": 47823,
     # Off by default: reads Claude Code's OAuth token from the macOS Keychain.
     "plan_usage": False,
@@ -83,6 +87,14 @@ DEFAULT_CONFIG = {
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 PROJECT_REPO = "boujois/waveshare-esp32-claude-monitor"
 INSTALLER_SITE = "https://boujois.github.io/waveshare-esp32-claude-monitor"
+DEFAULT_BOARD = "waveshare-s3-lcd128"  # what a display that doesn't say which board it is
+
+
+def firmware_asset(board):
+    """The release file with the app-only firmware for a board, as /info names it (the Waveshare's
+    keeps the name it had before releases covered other boards)."""
+    board = board or DEFAULT_BOARD
+    return "claude-monitor-app.bin" if board == DEFAULT_BOARD else f"claude-monitor-app-{board}.bin"
 HELPER_DIR = Path(__file__).resolve().parent
 VERSION_PATH = Path(__file__).with_name("VERSION")  # written into release packages
 LOG_PATH = Path.home() / "Library/Logs/claude-status-bridge.log"  # where install.sh's agent logs
@@ -483,6 +495,153 @@ def read_live_sessions():
         if sid and pid_alive(d.get("pid")):
             out[sid] = d
     return out
+
+
+# ---- Opening a session's app: a tap on the display's card, or Open in the menu bar app ----
+
+# Apps that open a folder in the window that already has it, which is the session's window
+FOLDER_EDITORS = {"Visual Studio Code.app", "Visual Studio Code - Insiders.app", "Cursor.app",
+                  "Windsurf.app", "VSCodium.app"}
+
+# Terminals whose tab running the session can be picked out by its tty (argv: /dev/ttysNNN)
+TERMINAL_SCRIPTS = {
+    "Terminal.app": """on run argv
+  set want to item 1 of argv
+  tell application "Terminal"
+    repeat with w in windows
+      repeat with t in tabs of w
+        if tty of t is want then
+          set selected of t to true
+          set index of w to 1
+          activate
+          return "found"
+        end if
+      end repeat
+    end repeat
+    activate
+  end tell
+end run""",
+    "iTerm.app": """on run argv
+  set want to item 1 of argv
+  tell application "iTerm2"
+    repeat with w in windows
+      repeat with t in tabs of w
+        repeat with s in sessions of t
+          if tty of s is want then
+            tell w to select
+            tell t to select
+            tell s to select
+            activate
+            return "found"
+          end if
+        end repeat
+      end repeat
+    end repeat
+    activate
+  end tell
+end run""",
+}
+
+
+def _run(cmd, timeout=10):
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+
+
+def process_chain(pid, limit=40):
+    """(pid, executable) for pid and each of its parents in turn, nearest first."""
+    chain = []
+    while pid and pid > 1 and len(chain) < limit:
+        try:
+            out = _run(["ps", "-o", "ppid=,comm=", "-p", str(pid)], timeout=5).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            break
+        parts = out.split(None, 1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            break
+        chain.append((pid, parts[1]))
+        pid = int(parts[0])
+    return chain
+
+
+def app_bundle(path):
+    """The outermost .app bundle an executable is in ("/Applications/Visual Studio Code.app" for its
+    helpers too), or None."""
+    i = path.find(".app/")
+    return path[:i + 4] if i >= 0 else None
+
+
+def _host_app(bundle):
+    """The bundle, unless it's Claude Code's own: the claude CLI can live in a bundle of its own
+    (".../claude.app/Contents/MacOS/claude"), which isn't where the session is shown."""
+    return bundle if bundle and os.path.basename(bundle) != "claude.app" else None
+
+
+def find_app(pid):
+    """The app a session runs in: the bundle of the nearest of its parent processes that's in one
+    (not the session's own process, which is Claude Code). ps names most executables by their full
+    path; for any it doesn't, the command line tells."""
+    chain = process_chain(pid)[1:]
+    for _, exe in chain:
+        bundle = _host_app(app_bundle(exe))
+        if bundle:
+            return bundle
+    for ancestor, _ in chain:
+        try:
+            bundle = _host_app(app_bundle(_run(["ps", "-o", "args=", "-p", str(ancestor)], timeout=5).stdout.strip()))
+        except (OSError, subprocess.SubprocessError):
+            break
+        if bundle:
+            return bundle
+    return None
+
+
+def open_session(short_id):
+    """Brings the app running a session (by the 8-character id the display knows it by) to the
+    front, at its window or tab where it can. Returns the app's name, or None if it isn't found."""
+    try:
+        return _open_session(short_id)
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f"open {short_id} failed:", e)
+        return None
+
+
+def _open_session(short_id):
+    if short_id == "chat":
+        _run(["open", "-b", CLAUDE_APP_ID])
+        return "Claude"
+    sid, d = next(((sid, d) for sid, d in read_live_sessions().items() if sid.startswith(short_id)),
+                  (None, None)) if short_id else (None, None)
+    if not d:
+        log(f"open: no running session {short_id!r}")
+        return None
+    try:
+        pid = int(d.get("pid"))
+    except (TypeError, ValueError):
+        return None
+    bundle = find_app(pid)
+    if not bundle:
+        log(f"open: {short_id} isn't running in an app (tmux or ssh?):",
+            " < ".join(exe for _, exe in process_chain(pid)[:8]))
+        return None
+    name, cwd = os.path.basename(bundle), d.get("cwd")
+    script = TERMINAL_SCRIPTS.get(name)
+    tty = _run(["ps", "-o", "tty=", "-p", str(pid)], timeout=5).stdout.strip() if script else ""
+    if script and tty and tty != "??":
+        res = _run(["osascript", "-e", script, "/dev/" + tty], timeout=15)
+        if res.returncode != 0:  # e.g. not allowed to control the app yet: still bring it forward
+            log("open: couldn't pick the tab:", (res.stderr or res.stdout).strip()[:200])
+            _run(["open", bundle])
+    elif name in FOLDER_EDITORS and cwd and os.path.isdir(cwd):
+        _run(["open", "-a", bundle, cwd])
+    elif name == "Claude.app":
+        # The Code tab: the link `claude --desktop --resume <id>` opens shows that session, not
+        # whichever tab you were last on
+        if _run(["open", f"claude://resume?session={sid}"]).returncode != 0:
+            _run(["open", bundle])
+    else:
+        _run(["open", bundle])
+    log(f"opened {short_id} in {name[:-4]} ({bundle})")
+    return name[:-4]
 
 
 def build_sessions(hooks, done_window, extra_rows=()):
@@ -1256,6 +1415,19 @@ def save_config(**changes):
             raise
 
 
+def source_name(cfg):
+    """This Mac's name for the display: config.json's source_name, or its local hostname, which
+    unlike socket.gethostname() doesn't change with the network it's on."""
+    name = cfg.get("source_name")
+    if not name:
+        try:
+            name = subprocess.run(["scutil", "--get", "LocalHostName"], capture_output=True,
+                                  text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            name = ""
+    return ascii_text(name or socket.gethostname().split(".")[0] or "mac", 32)
+
+
 def device_key(cfg):
     """The key this Mac pairs with the display, created and saved on first use."""
     if not cfg.get("device_key"):
@@ -1371,8 +1543,9 @@ class UsbLink:
 class Device:
     WIFI_RETRY = 60  # while on USB, how often to check whether Wi-Fi reaches the display again
 
-    def __init__(self, host, usb=True):
+    def __init__(self, host, source="", usb=True):
         self.host = host
+        self.source = source  # this Mac's name on the display (see source_name())
         self.ip = None
         self.ok = None  # whether the last push got through; None before the first
         self.last_push = 0  # when a push last got through
@@ -1386,18 +1559,36 @@ class Device:
         self.card = None
         self._card_asked = 0  # when the request it came from was sent
         self._card_lock = threading.Lock()
+        # A tap on the display's card asks to open its session: on_open(id) runs when the display's
+        # {"boot", "seq"} moves on (not when it first says, or after it restarts). tap: it can ask.
+        self.on_open = None
+        self.tap_open = False
+        self._open_seen = None
 
     def _got_card(self, asked, reply):
         """Notes the card from the display's reply to a request sent at asked, unless a later
         request has already answered (a push and a dismissal can cross)."""
         card = reply.get("card") if isinstance(reply, dict) else None
         if isinstance(card, dict) and isinstance(card.get("key"), str) and card["key"]:
-            card = {k: str(card.get(k) or "") for k in ("key", "icon", "title", "name")}
+            card = {k: str(card.get(k) or "") for k in ("key", "icon", "title", "name", "id", "src")}
         else:
             card = None
         with self._card_lock:
             if asked >= self._card_asked:
                 self._card_asked, self.card = asked, card
+        self._got_open(reply.get("open") if isinstance(reply, dict) else None)
+
+    def _got_open(self, req):
+        if not isinstance(req, dict) or not isinstance(req.get("seq"), int):
+            return
+        self.tap_open = req.get("tap") is True
+        seen, now = self._open_seen, (req.get("boot"), req["seq"])
+        self._open_seen = now
+        # With several Macs on one display, only the one running the session opens it
+        mine = not req.get("src") or req.get("src") == self.source
+        if seen and seen[0] == now[0] and seen[1] != now[1] and self.on_open and mine:
+            short_id = str(req.get("id") or "")
+            threading.Thread(target=self.on_open, args=(short_id,), daemon=True).start()
 
     def _resolve(self):
         try:
@@ -1509,7 +1700,8 @@ class Device:
         return f"http://{self.ip}{path}"
 
     def info(self):
-        """{"version", "paired", "ip"} from the display (firmware with Wi-Fi updates only)."""
+        """{"version", "board", "paired", "ip", ...} from the display (firmware with Wi-Fi updates only;
+        "board" since it came in more than one)."""
         if self.via == "usb":
             return json.loads(self._usb_request("/info", "@info"))
         with urllib.request.urlopen(self._url("/info"), timeout=5) as r:
@@ -1691,14 +1883,15 @@ def make_handler(bridge):
                     elif chats:
                         chats.add_question(body.get("question"), body.get("chat_title"))
                 return self._reply(200)
-            if self.path not in ("/settings", "/usage/connect", "/usage/refresh", "/display/dismiss"):
+            if self.path not in ("/settings", "/usage/connect", "/usage/refresh", "/display/dismiss",
+                                 "/display/open"):
                 return self._reply(404, {"error": "Not found"})
             # Requiring JSON makes a browser ask first (a CORS preflight), which goes unanswered
             if self.headers.get_content_type() != "application/json":
                 return self._reply(415, {"error": "Content-Type must be application/json"})
             extra = {}
             try:
-                if self.path in ("/settings", "/display/dismiss"):
+                if self.path in ("/settings", "/display/dismiss", "/display/open"):
                     try:
                         body = json.loads(raw or b"{}")
                     except ValueError:
@@ -1711,6 +1904,11 @@ def make_handler(bridge):
                     if key is not None and not isinstance(key, str):
                         raise SettingError("key must be a string")
                     bridge.dismiss_card(key)
+                elif self.path == "/display/open":
+                    key = body.get("key") if isinstance(body, dict) else None
+                    if key is not None and not isinstance(key, str):
+                        raise SettingError("key must be a string")
+                    bridge.open_card(key)
                 elif self.path == "/usage/connect":
                     extra["signed_in"] = bridge.connect_usage()
                 else:
@@ -1773,14 +1971,15 @@ class Bridge:
         self.focus = FocusWatcher()
         self.usage = UsageWatcher(cfg["plan_usage_interval"], s["plan_usage"], background=not once)
         self.chats = self.ci = self.incidents = None
-        self.device = Device(cfg["device_host"], usb=cfg["usb_fallback"])
+        self.device = Device(cfg["device_host"], source_name(cfg), usb=cfg["usb_fallback"])
         self.tz = posix_timezone()
         self.key = device_key(cfg)
-        self.release = {"tag": None, "next": 0}
-        self.display = {"version": None, "paired": None, "night": None, "next": 0}  # night: has night mode
+        self.release = {"tag": None, "assets": None, "next": 0}
+        self.display = {"version": None, "board": None, "paired": None, "night": None, "next": 0}  # night: has night mode
         self.state = {}  # the latest state for the display
         self.payload = None  # ...as sent, with its timestamp
         self.push_soon = False  # push on the next pass even if nothing changed
+        self.device.on_open = open_session
 
     def settings(self):
         with self.lock:
@@ -1845,6 +2044,20 @@ class Bridge:
             raise DisplayError("Couldn't reach the display.") from None
         log("dismissed the card on the display" if dismissed else "dismiss: the display's card had changed")
 
+    def open_card(self, key):
+        """POST /display/open: brings the app running the session on the display's card to the
+        front, if that card is still the one with this key (any card, with None). Raises
+        DisplayError."""
+        card = self.device.card
+        if not card or (key is not None and card["key"] != key):
+            raise DisplayError("That card isn't on the display any more.")
+        if card.get("src") and card["src"] != self.device.source:
+            raise DisplayError(f"That session is on another Mac ({card['src']}).")
+        if not card.get("id"):
+            raise DisplayError("Update the display to open its sessions from here.")
+        if not open_session(card["id"]):
+            raise DisplayError("Couldn't find where that session is running.")
+
     def watch_card(self):
         """The menu bar app is looking. A card dismissed on the display (a double tap) goes
         without a push, so push soon to hear what's on screen now."""
@@ -1854,7 +2067,11 @@ class Bridge:
     def update_available(self):
         """The latest release when the helper or the display is behind it, else None."""
         tag, current = self.release["tag"], self.display["version"]
-        if tag and (is_newer(tag, helper_version()) or is_newer(tag, current) or current == "old"):
+        assets = self.release["assets"]
+        # Only offer the display an update the release has firmware for (its board's)
+        has_firmware = assets is None or firmware_asset(self.display["board"]) in assets
+        if tag and (is_newer(tag, helper_version()) or (has_firmware and is_newer(tag, current))
+                    or current == "old"):
             return tag
         return None
 
@@ -1868,7 +2085,8 @@ class Bridge:
             "log_path": str(LOG_PATH),
             "claude_cli": claude_cli(),
             "display": {"host": self.device.host, "reachable": self.device.ok, "link": self.device.via,
-                        "version": self.display["version"], "last_push": int(self.device.last_push),
+                        "version": self.display["version"], "board": self.display["board"],
+                        "last_push": int(self.device.last_push),
                         "night_mode": self.display["night"], "card": self.device.card},
             "update": self.update_available(),
             "usage": self.usage.status(),
@@ -1887,7 +2105,8 @@ class Bridge:
         display["next"] = now + 600
         try:
             info = self.device.info()
-            display.update(version=info.get("version"), paired=info.get("paired"), night="night" in info)
+            display.update(version=info.get("version"), board=info.get("board") or DEFAULT_BOARD,
+                           paired=info.get("paired"), night="night" in info)
             if not info.get("paired"):
                 self.device.pair(self.key)
                 display["paired"] = True
@@ -1903,7 +2122,8 @@ class Bridge:
             return
         self.release["next"] = now + self.cfg["update_check_interval"]
         try:
-            self.release["tag"] = latest_release()["tag"]
+            release = latest_release()
+            self.release.update(tag=release["tag"], assets=release["assets"])
         except (OSError, ValueError, KeyError) as e:
             self.release["next"] = now + 3600
             log("update check failed:", e)
@@ -1922,6 +2142,7 @@ class Bridge:
         hook_snap, _ = self.hooks.snapshot()
         rows, counts = build_sessions(hook_snap, self.cfg["done_window"], chats.rows() if chats else ())
         state = {
+            "source": self.device.source,  # so one display can show several Macs
             "sessions": rows[:MAX_SESSIONS_SENT],
             "counts": counts,
             "today": self.today.snapshot(),
@@ -1992,6 +2213,8 @@ class Bridge:
             payload = json.dumps({**state, "t": int(now)}, separators=(",", ":")).encode()
             self.state, self.payload = state, payload
             due = body != last_sent or now - last_push >= cfg["heartbeat_interval"] or self.push_soon
+            # A tap on a touch screen's card waits for the next push to reach the Mac: push every pass
+            due = due or (self.device.tap_open and self.device.card is not None)
             if self.device.ok is False and now - last_push < 5:
                 due = False  # device unreachable: retry every few seconds, not every loop
             if due:

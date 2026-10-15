@@ -36,6 +36,8 @@
     esp-web-install-button button[slot] {
       background: var(--accent); color: var(--accent-text); border: 0; border-radius: 999px;
       padding: 12px 28px; font-size: 17px; font-weight: 600; cursor: pointer; }
+    .boards { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 2px; }
+    .boards label { display: flex; gap: 8px; align-items: center; cursor: pointer; }
     .warn { background: var(--warn-bg); border-radius: 10px; padding: 10px 14px; font-size: 14px; }
     code { background: var(--line); border-radius: 5px; padding: 1px 6px; font-size: 14px; }
     .cmd { display: flex; gap: 8px; margin: 10px 0; min-width: 0; }
@@ -71,8 +73,17 @@
     <div class="num">1</div>
     <div>
       <h2>Plug in the display</h2>
-      <p>Connect the Waveshare ESP32-S3 round display to this computer with a USB-C cable.
+      <p>Connect the round display to this computer with a USB-C cable.
          It must be a cable that carries data. Many charging-only cables don't.</p>
+      <p>Which display is it?</p>
+      <div class="boards">
+        <label><input type="radio" name="board" value="manifest.json" checked>
+          Waveshare ESP32-S3-LCD-1.28</label>
+        <label><input type="radio" name="board" value="manifest-waveshare-s3-touch-lcd128.json">
+          Waveshare ESP32-S3-Touch-LCD-1.28 (the touch version)</label>
+        <label><input type="radio" name="board" value="manifest-lilygo-t-rgb.json">
+          LilyGO T-RGB (2.1" or 2.8")</label>
+      </div>
     </div>
   </div>
 
@@ -84,7 +95,7 @@
          <code>USB Single Serial</code> or <code>usbmodem…</code>), and click <b>Install</b>.
          It takes about a minute.</p>
       <div class="install">
-        <esp-web-install-button manifest="manifest.json">
+        <esp-web-install-button id="installer" manifest="manifest.json">
           <button slot="activate">Install Claude Monitor</button>
           <span slot="unsupported">
             <p class="warn">This browser can't talk to USB devices. Open this page in
@@ -138,6 +149,13 @@
      plug it back in <b>3 times in a row</b>, each within 10 seconds of the last, to reopen Wi-Fi setup.</p>
 </main>
 <script>
+  // The firmware for the display chosen in step 1
+  for (const radio of document.querySelectorAll("input[name=board]")) {
+    radio.addEventListener("change", () => {
+      if (radio.checked) document.getElementById("installer").setAttribute("manifest", radio.value);
+    });
+  }
+
   for (const button of document.querySelectorAll("[data-copy]")) {
     button.addEventListener("click", async () => {
       const text = document.getElementById(button.dataset.copy).textContent;

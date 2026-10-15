@@ -76,6 +76,7 @@ struct DisplayCard: Decodable, Sendable {
     var icon: String?   // the symbol in its circle: exclamation | question | check | cross | spinner | dash
     var title: String?  // its headline, e.g. "Permission"
     var name: String?   // the session's name, or the pull request's
+    var id: String?     // its session's id, which Open brings up (firmware from before Open never says)
 }
 
 struct UsageStatus: Decodable, Sendable {
@@ -196,6 +197,14 @@ struct HelperClient: Sendable {
     func dismissCard(_ key: String) async throws -> SettingsResponse {
         var req = request("display/dismiss", body: try JSONEncoder().encode(["key": key]))
         req.timeoutInterval = 10
+        return try await send(req)
+    }
+
+    /// Brings the app running the session on the display's card to the front, if it's still the
+    /// card with this key.
+    func openCard(_ key: String) async throws -> SettingsResponse {
+        var req = request("display/open", body: try JSONEncoder().encode(["key": key]))
+        req.timeoutInterval = 20
         return try await send(req)
     }
 

@@ -4,7 +4,11 @@
 #   flash-display.sh /dev/cu.usbmodem...
 #
 # Install.command runs this from the firmware folder of the Mac package, next to the four
-# files it writes. They're the same parts at the same addresses as the installer page, so
+# files it writes for the Waveshare board; each other board's are in a folder named after it
+# (waveshare-s3-touch-lcd128/, lilygo-t-rgb/). The LilyGO T-RGB is told apart by its PSRAM, which
+# esptool reports: its ESP32-S3R8 has 8 MB, the Waveshare's ESP32-S3R2 2 MB. The two Waveshare
+# versions have the same chip, so for those it asks whether the display has a touch screen.
+# CLAUDE_MONITOR_BOARD=<board> skips both. They're the same parts at the same addresses as the installer page, so
 # the display keeps any Wi-Fi and pairing it already has. Flashing uses Espressif's
 # standalone esptool, downloaded for the job and checked against a pinned checksum, so
 # neither Python nor a browser is needed. CLAUDE_MONITOR_ESPTOOL=<path> uses another esptool.
@@ -42,26 +46,60 @@ get_esptool() {
   ESPTOOL="$TMP/esptool-macos-$arch/esptool"
 }
 
+# Prints which board is on the port: lilygo-t-rgb (8 MB PSRAM), or for anything else the Waveshare,
+# waveshare-s3-touch-lcd128 if the person says it has a touch screen, else waveshare-s3-lcd128.
+# Leaves the display waiting in its bootloader, so writing to it comes next.
+detect_board() {
+  local out
+  out="$("$ESPTOOL" --chip esp32s3 --port "$PORT" --after no-reset chip-id 2>&1)" || {
+    echo "$out" >&2
+    return 1
+  }
+  if echo "$out" | grep -q "PSRAM 8MB"; then
+    echo lilygo-t-rgb
+    return
+  fi
+  local answer=""
+  if [ -r /dev/tty ]; then
+    printf "Does the display have a touch screen (the Waveshare ESP32-S3-Touch-LCD-1.28)? [y/N] " >/dev/tty
+    read -r answer </dev/tty || answer=""
+  fi
+  case "$answer" in
+    [yY]*) echo waveshare-s3-touch-lcd128 ;;
+    *) echo waveshare-s3-lcd128 ;;
+  esac
+}
+
 main() {
   if [ -z "$PORT" ]; then
     echo "Usage: $0 <serial port, e.g. /dev/cu.usbmodem...>" >&2
     return 2
   fi
-  for part in bootloader.bin partitions.bin boot_app0.bin firmware.bin; do
-    if [ ! -f "$DIR/$part" ]; then
-      echo "$part is missing from $DIR" >&2
-      return 1
-    fi
-  done
   if [ -z "$ESPTOOL" ]; then
     get_esptool || return 1
   fi
+  local board="${CLAUDE_MONITOR_BOARD:-}" parts="$DIR"
+  if [ -z "$board" ]; then
+    board="$(detect_board)" || return 1
+  fi
+  case "$board" in
+    waveshare-s3-lcd128) echo "This is the Waveshare round display." ;;
+    waveshare-s3-touch-lcd128) echo "This is the Waveshare round display with a touch screen."; parts="$DIR/waveshare-s3-touch-lcd128" ;;
+    lilygo-t-rgb) echo "This is the LilyGO T-RGB round display."; parts="$DIR/lilygo-t-rgb" ;;
+    *) echo "Unknown board \"$board\"" >&2; return 1 ;;
+  esac
+  for part in bootloader.bin partitions.bin boot_app0.bin firmware.bin; do
+    if [ ! -f "$parts/$part" ]; then
+      echo "$part is missing from $parts" >&2
+      return 1
+    fi
+  done
   echo "Putting the software on the display. Don't unplug it until this finishes."
   # --chip makes esptool refuse anything that isn't an ESP32-S3. 921600 baud is what
-  # PlatformIO uses for this board. One connection only: each one restarts the display.
+  # PlatformIO uses for both boards.
   "$ESPTOOL" --chip esp32s3 --port "$PORT" --baud 921600 write-flash \
-    0x0 "$DIR/bootloader.bin" 0x8000 "$DIR/partitions.bin" \
-    0xe000 "$DIR/boot_app0.bin" 0x10000 "$DIR/firmware.bin"
+    0x0 "$parts/bootloader.bin" 0x8000 "$parts/partitions.bin" \
+    0xe000 "$parts/boot_app0.bin" 0x10000 "$parts/firmware.bin"
 }
 
 main "$@"

@@ -36,6 +36,7 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
 - [The menu bar app](#the-menu-bar-app)
 - [Without Wi-Fi: over the USB cable](#without-wi-fi-over-the-usb-cable)
 - [Using a LilyGO T-RGB](#using-a-lilygo-t-rgb)
+- [One display, several Macs](#one-display-several-macs)
 - [Updating](#updating)
 - [Reading the screen](#reading-the-screen)
 - [Configuration](#configuration)
@@ -82,7 +83,7 @@ You change the options from a small [menu bar app](#the-menu-bar-app) on your Ma
 
 | | |
 |---|---|
-| 🖥️ **The display** | [Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28): an ESP32-S3 with a 1.28" 240×240 round screen (GC9A01). The version with the CNC metal case ("-B") looks great on a desk. Both the non-touch and the touch version (ESP32-S3-Touch-LCD-1.28) work. The installer and releases are for the non-touch version; for the touch version, build with `pio run -e waveshare-s3-touch-lcd128 -t upload` (see [Option 3](#option-3-build-it-yourself-step-by-step)). |
+| 🖥️ **The display** | One of these ESP32-S3 round displays. The installers and Wi-Fi updates put the right software on each:<br>• **[Waveshare ESP32-S3-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-LCD-1.28)**: 1.28", 240×240. The "-B" version with the CNC metal case looks great on a desk.<br>• **[Waveshare ESP32-S3-Touch-LCD-1.28](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.28)**: the same display with a touch panel (which isn't used).<br>• **[LilyGO T-RGB](#using-a-lilygo-t-rgb)**: a bigger 2.1" or 2.8", 480×480 screen, where you tap the screen instead of the case. |
 | 🔌 **A USB-C cable** | For flashing, and for power afterwards. Once it's set up, any USB phone charger will do. |
 | 🍎 **A Mac** | Running Claude Code. The helper uses `launchd` and the macOS Keychain, and the [menu bar app](#the-menu-bar-app) needs macOS 13 or later. |
 | 📶 **2.4 GHz Wi-Fi** | The ESP32 can't join 5 GHz-only networks. |
@@ -381,7 +382,7 @@ Claude Monitor puts a small icon in your Mac's menu bar, near the clock: a **cir
 Click it for:
 
 - **Status:** whether the display is connected, and which firmware it runs; your sessions, e.g. *1 needs you · 2 working*; any Anthropic incident; and an **Update to v1.x.x…** button when there's a new release.
-- **What's on the display:** the alert, Done card or CI card on its screen, with a **Dismiss** button that hides it just like a double tap. This needs display firmware newer than v1.5.0 (see [Updating](#updating)).
+- **What's on the display:** the alert, Done card or CI card on its screen, with an **Open** button that brings up the app that session runs in (see [Jump to the session](#jump-to-the-session)) and a **Dismiss** button that hides it just like a double tap. These need display firmware newer than v1.5.0 (see [Updating](#updating)); Open needs a newer one still.
 - **Plan usage:** **Connect**, then your 5-hour and weekly usage and when each resets. **Disconnect** turns it off. See [step 6](#6-optional-turn-on-plan-usage-rings).
 - **Night mode:** on or off, **From** and **To** times, **Screen** *Off* or *Dim*, and **Alerts still light it up**. See [Night mode](#night-mode).
 - **Display:** switches for **Cat**, **CI checks** and **Anthropic incidents**.
@@ -410,15 +411,11 @@ A few things still need Wi-Fi: firmware updates from the Mac (the helper updates
 
 ## Using a LilyGO T-RGB
 
-The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. The T-RGB has no motion sensor, so the case taps are **taps on the screen** instead: double-tap the screen to dismiss a card, or tap it 5 times for diagnostics. The **BOOT** button works as described above.
+The firmware also runs on the [LilyGO T-RGB](https://www.lilygo.cc/products/t-rgb) (ESP32-S3 with a 480×480 round RGB screen), both the 2.1" (half- or full-circle touch) and the 2.8". The UI is the same one, drawn at 240×240 and scaled up 2× with smoothing. The T-RGB has no motion sensor, so the case taps are **taps on the screen** instead: tap a card once to [jump to its session](#jump-to-the-session) on your Mac, double-tap to dismiss it, or tap 5 times for diagnostics. The **BOOT** button works as described above.
 
-1. Flash it over USB from source (the published installer and release files are for the Waveshare board):
-   ```bash
-   cd claude-status/firmware
-   pio run -e lilygo-t-rgb -t upload
-   ```
-   If the upload can't find the board, hold **BOOT**, tap **RST**, release **BOOT**, and run it again.
-2. Set up Wi-Fi from your phone and install the Mac helper exactly as for the Waveshare board (Option 2 step 3, or Option 3 step 4). Skip the firmware installer.
+It installs and updates like the Waveshare: the one-line installer, `Install.command` and the [installer page](https://boujois.github.io/waveshare-esp32-claude-monitor/) all put the right software on it (the installers tell the boards apart by their memory; on the page, pick **LilyGO T-RGB**), and the menu bar app's **Update** button updates it over Wi-Fi with the T-RGB build from each release.
+
+To build it yourself instead: `cd claude-status/firmware && pio run -e lilygo-t-rgb -t upload`. If the upload can't find the board, hold **BOOT**, tap **RST**, release **BOOT**, and run it again. A build from source reports version `dev`, so the menu bar app doesn't offer it updates until you install a release.
 
 Some T-RGB panels show mixed colours too blue, so the T-RGB build turns blue and green down a little (white balance red 100%, green 90%, blue 70%). Adjust it live from your Mac, and it's saved on the display:
 ```bash
@@ -432,7 +429,28 @@ To change how bright the normal screens are (alerts are always full brightness),
 
 The screen type is detected from the touch controller at start-up, but the newer revision of the 2.1" board (V2) can't be told apart from the original, so it gets the original's settings. If the screen is blank, tinted or the colours look wrong, force the type by adding e.g. `-DTRGB_PANEL=LILYGO_T_RGB_2_8_INCHES` (or `LILYGO_T_RGB_2_1_INCHES_FULL_CIRCLE`, `…_HALF_CIRCLE`, `…_FULL_CIRCLE_V2`, `…_HALF_CIRCLE_V2`) to `build_flags` in the `lilygo-t-rgb` environment.
 
-Wi-Fi firmware updates from the Mac helper download the Waveshare release, so a T-RGB refuses them (`/info` reports `"board": "lilygo-t-rgb"`) and the updater reports that the update failed. To update a T-RGB, pull the repo and flash it over USB again. A T-RGB built from source reports version `dev`, so the menu bar app doesn't offer it updates. The panel driver in `claude-status/firmware/src/trgb/` is LilyGO's, under its MIT licence.
+Each board only accepts Wi-Fi updates built for it (`/info` reports which board it is), so one can't be sent the other's software by mistake. The panel driver in `claude-status/firmware/src/trgb/` is LilyGO's, under its MIT licence.
+
+---
+
+## One display, several Macs
+
+One display can show up to four Macs at once, such as a desktop and a laptop. Install the Mac helper on each one (any of the [install options](#install), skipping the flashing step on the second Mac) and point them all at the same display. That's all: each helper tells the display which Mac it is, and the display merges them.
+
+- **Alerts:** a session on any Mac that needs you lights the display, and the one waiting longest is shown first, whichever Mac it's on.
+- **Status screen:** the session list and counts cover every Mac. Today's prompts and tokens add up across them. The plan usage rings come from the first Mac with plan usage turned on.
+- **Jump to the session:** a tap on a card opens the session on the Mac it's running on. The other Macs ignore it.
+- **Settings:** the cat, night mode and timezone follow the first Mac that connected, while it's still pushing. If it goes to sleep, the next one takes over.
+- **Mac offline** only shows once every Mac has gone quiet for 30 seconds. A Mac that's asleep drops off the display within about 10 seconds of that, and its place is freed after 10 minutes.
+- **Updates over Wi-Fi** come from the Mac the display paired with first, so use its menu bar app to update. See [Updating](#updating).
+
+**Swipe between Macs (Waveshare touch board).** On the [touch version](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.28) of the display, swipe across the status screen to see each Mac on its own. Swipe left for the next page, right for the previous one. The first page is all Macs together; after it comes one page per Mac, with its name at the top, its own sessions and today's activity, or **Offline** and when it was last seen. Dots at the bottom show which page you're on.
+
+Alerts and Done cards still come from every Mac, whichever page is showing, so nothing that needs you is missed. Swipes only turn pages on the status screen. If that Mac stops pushing for 10 minutes, the display goes back to all Macs. The display's status page (`http://claude-status.local/`) counts the swipes it has seen, which helps if they don't seem to register.
+
+Each Mac goes by its local hostname (**System Settings → General → Sharing**). Two Macs with the same name would count as one, so give them different names, or set `source_name` in [`config.json`](#mac-helper-configjson). The display's status page (`http://claude-status.local/`) lists the Macs it's hearing from.
+
+A display needs firmware from this version or later to merge Macs; older firmware shows whichever Mac pushed last. Helpers from before this version still work, and all count as one Mac.
 
 ---
 
@@ -511,6 +529,17 @@ If several sessions are waiting, the one that has waited longest is shown, and t
 Double tap uses the board's built-in motion sensor. Typing, putting a mug down or knocking on the desk doesn't set it off, and neither does picking the display up.
 
 <br clear="right">
+
+### Jump to the session
+
+To answer an alert, you need the session that's asking. **Open** in the [menu bar app](#the-menu-bar-app), or a single tap on the card on a LilyGO T-RGB's touch screen, brings it up on your Mac:
+
+- **Terminal or iTerm2:** the app comes forward on the tab running that session. The first time, macOS asks whether the Claude Monitor helper (python3) may control the app: click **OK**.
+- **VS Code, Cursor, Windsurf:** the window with that session's folder comes forward.
+- **The Claude app's Code tab:** the app comes forward on that session. **A chat in the Claude app:** the app comes forward.
+- **Anything else:** the app it runs in comes forward. Sessions in `tmux` or over `ssh` aren't in an app, so nothing opens.
+
+The T-RGB shows *Opening on your Mac* when you tap. The Waveshare boards' taps are on the case, where a single one is too easy to set off by accident, so they use the menu bar app.
 
 ### The Done card
 
@@ -605,6 +634,7 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | Key | Default | What it does |
 |---|---|---|
 | `device_host` | `"claude-status.local"` | Hostname or IP of the display |
+| `source_name` | this Mac's local hostname | This Mac's name on the display, when [several Macs share it](#one-display-several-macs) |
 | `plan_usage` | `false` | Fetch 5-hour/weekly plan usage (see [step 6](#6-optional-turn-on-plan-usage-rings)) |
 | `plan_usage_interval` | `300` | Seconds between plan usage checks |
 | `push_interval` | `1.0` | How often (seconds) the helper checks for changes |
@@ -739,7 +769,7 @@ Click **Start helper**. If it doesn't start, **Open Log** shows why, and running
 <summary><b>Colours look wrong, or the screen is blank</b></summary>
 
 - **Inverted colours** (white background): flip `cfg.invert` in the `LGFX` class in `main.cpp`.
-- **Blank screen:** you may have the **touch** version (ESP32-S3-Touch-LCD-1.28), which uses different reset and backlight pins (RST 14, BL 2). Build it with `pio run -e waveshare-s3-touch-lcd128 -t upload`.
+- **Blank screen:** the software may be for the other Waveshare version. The touch version (ESP32-S3-Touch-LCD-1.28) uses different reset and backlight pins (RST 14, BL 2). Install again and answer **yes** when asked about a touch screen (or pick it on the installer page), or build it with `pio run -e waveshare-s3-touch-lcd128 -t upload`.
 </details>
 
 <details>
@@ -769,7 +799,7 @@ It's your Claude activity, so here's exactly what this project touches:
 
 - **Hooks** send event data (session ID, tool name and tool input such as the command being run) **only to `127.0.0.1`**, the helper on your own Mac.
 - **The helper reads** `~/.claude/sessions/` (session names and busy/idle state) and your transcript files in `~/.claude/projects/` (token counts and prompt *counts* only; it doesn't keep your messages).
-- **The display receives** session names, short details such as `Bash: npm test`, counts and usage percentages, your night mode hours and your Mac's clock, over your local Wi-Fi.
+- **The display receives** your Mac's local hostname, session names, short details such as `Bash: npm test`, counts and usage percentages, your night mode hours and your Mac's clock, over your local Wi-Fi.
 - **The helper's local API**, which the hooks, the chat connector and the menu bar app use, only listens on `127.0.0.1`, so nothing else on your network can reach it. It also turns away requests from web pages: it refuses any request with an `Origin` header, which browsers add, or with a `Host` other than `127.0.0.1` or `localhost`, which stops a website pointing its own name at your Mac (DNS rebinding). It never hands out the display's pairing key or your Claude sign-in.
 - **Chat alerts:** the helper reads the Claude app's chat-window log (`~/Library/Logs/Claude/claude.ai-web.log`), but only the tool approval lines, which contain a tool name. The connector sends the short question and chat title Claude gives it to the helper on `127.0.0.1`, and from there to the display.
 - **Reply checks:** when a Claude Code turn ends without an obvious question, the last 3,000 characters of Claude's reply are sent to Claude Haiku, through your own `claude` sign-in, to ask whether it's waiting on you. Turn this off with `"check_replies": false`.
@@ -876,7 +906,7 @@ python3 designs.py        # writes designs/*.stl and prints fit, stability and o
 │           ├── night.cpp / .h       # night mode: when the screen goes dark, and how bright it is
 │           └── secrets.h.example
 ├── tools/build-release.sh           # builds dist/: firmware, Mac zip with the menu bar app, installer page
-├── .github/workflows/release.yml    # on a v* tag: build, publish release + installer page
+├── .github/workflows/release.yml    # on a merge to main or a v* tag: build, publish release + installer page
 ├── stand/                           # 3D-printable desk stands
 │   ├── make_stand.py                # shared ring + design 9 -> designs/9-automotive.stl
 │   ├── designs.py                   # designs 1-8 -> designs/*.stl

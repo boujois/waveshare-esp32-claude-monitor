@@ -8,5 +8,12 @@
 bool tapsBegin(float tapG);
 
 // How often each gesture has happened so far: compare with earlier counts to spot new ones.
+uint32_t singleTapCount();  // a single tap on its own (touch screens only: 0 with the motion sensor)
 uint32_t doubleTapCount();  // exactly two quick taps
 uint32_t fiveTapCount();    // five quick taps (more in the same run don't count again)
+
+// Swipes across the touch screen (the Waveshare touch board only: 0 elsewhere), by the direction
+// the finger moved, and the last gesture code the touch controller reported (for diagnostics).
+uint32_t swipeLeftCount();
+uint32_t swipeRightCount();
+uint8_t lastTouchGesture();
