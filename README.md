@@ -407,7 +407,7 @@ There's nothing to set up. The helper finds the display among your USB devices b
 
 A few things still need Wi-Fi: firmware updates from the Mac (the helper updates itself as usual), the screenshot at `/screen.bmp`, and the other HTTP endpoints. To turn the fallback off, set `"usb_fallback": false` in [`config.json`](#mac-helper-configjson).
 
-> If you flash the display over USB (`pio run -t upload` or `esptool`) while the helper is using the cable, stop the helper first, or the two get in each other's way: `launchctl bootout gui/$(id -u)/com.claude-status.bridge`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-status.bridge.plist` afterwards.
+> The helper leaves the cable alone while `esptool` (or `pio run -t upload`) is flashing the display. If the helper is already using the cable when you start, the flash stops with an error saying the port is busy: stop the helper first, `launchctl bootout gui/$(id -u)/com.claude-status.bridge`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-status.bridge.plist` afterwards.
 
 ## Using a LilyGO T-RGB
 

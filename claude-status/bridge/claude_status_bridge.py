@@ -1495,6 +1495,12 @@ class UsbLink:
             except OSError:
                 continue
             try:
+                # The same lock esptool takes while flashing, so neither gets in the other's way
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                os.close(fd)
+                continue
+            try:
                 # Raw 115200 8N1. Opening leaves DTR and RTS both on, which doesn't reset the board
                 # (its auto-reset circuit needs them to differ).
                 cc = termios.tcgetattr(fd)[6]
