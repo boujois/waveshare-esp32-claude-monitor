@@ -908,6 +908,19 @@ static void paceTick(int r0, int r1, float gone) {
   frame.drawWedgeLine(CX + (r0 - 2) * c, CY + (r0 - 2) * s, CX + (r1 + 2) * c, CY + (r1 + 2) * s, 1.2f, 1.2f, COL_TEXT);
 }
 
+// The USB symbol (a trident), centred on x, y and about 16 pixels tall: shown beside the clock
+// while the Mac is sending over the USB cable
+static void drawUsbIcon(int x, int y, uint32_t col) {
+  frame.drawWideLine(x, y - 5, x, y + 5, 0.8f, col);              // stem
+  frame.fillTriangle(x, y - 8, x - 3, y - 4, x + 3, y - 4, col);  // arrowhead
+  frame.fillCircle(x, y + 6, 2, col);                             // base
+  frame.drawWideLine(x, y + 2, x - 4, y - 1, 0.8f, col);          // left branch, to a dot
+  frame.drawWideLine(x - 4, y - 1, x - 4, y - 2, 0.8f, col);
+  frame.fillCircle(x - 4, y - 3, 1, col);
+  frame.drawWideLine(x, y + 0, x + 4, y - 2, 0.8f, col);          // right branch, to a square
+  frame.fillRect(x + 3, y - 5, 3, 3, col);
+}
+
 static void drawStatus(bool stale) {
   frame.fillScreen(COL_BG);
   bool live = st.valid && !stale;
@@ -932,6 +945,7 @@ static void drawStatus(bool stale) {
     strftime(hm, sizeof(hm), "%H:%M", &t);
     text(hm, CX, 43, COL_DIM, &fonts::FreeSansBold9pt7b);
   }
+  if (live && usbLink()) drawUsbIcon(CX + 36, 43, COL_DIM);
 
   // Pace ticks: usage past its tick will run out before the window resets
   if (usage) {
