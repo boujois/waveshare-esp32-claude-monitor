@@ -327,6 +327,9 @@ bool tapsBegin(float) {
 uint32_t singleTapCount() { return touchtaps::singles; }
 uint32_t doubleTapCount() { return touchtaps::doubles; }
 uint32_t fiveTapCount() { return touchtaps::fives; }
+uint32_t swipeLeftCount() { return 0; }  // swipes are read on the Waveshare touch board only, so far
+uint32_t swipeRightCount() { return 0; }
+uint8_t lastTouchGesture() { return 0; }
 
 #endif  // BOARD_LILYGO_T_RGB
 
@@ -695,12 +698,52 @@ static String macsLine() {
   return out + "\n";
 }
 
+// ---- Pages: swipe between all Macs and each Mac on its own ----
+// Only on the status screen, and only once two or more Macs have pushed. Alerts and Done cards
+// still come from every Mac, whichever page is showing, so nothing that needs you is missed.
+static bool pageAll = true;  // the merged page
+static String pageMac;       // otherwise, the Mac whose page it is
+
+// The page showing now: -1 for all Macs, else an index into sources
+static int currentPage() {
+  if (pageAll || sources.size() < 2) return -1;
+  for (size_t i = 0; i < sources.size(); i++)
+    if (sources[i].name == pageMac) return i;
+  pageAll = true;  // that Mac has gone: back to all of them
+  return -1;
+}
+
+// Moves by steps pages (+1 next, -1 previous), wrapping around: all Macs, then each Mac in turn
+static void turnPage(int steps) {
+  int n = sources.size() + 1;
+  if (n < 3) return;
+  int p = ((currentPage() + 1 + steps) % n + n) % n;
+  pageAll = p == 0;
+  if (p) pageMac = sources[p - 1].name;
+}
+
+// Dots at the bottom of the status screen, one per page, the current one filled
+static void drawPageDots() {
+  int n = sources.size() + 1, cur = currentPage() + 1;
+  const int gap = 10, y = 204;
+  int x = CX - (n - 1) * gap / 2;
+  for (int i = 0; i < n; i++, x += gap) {
+    if (i == cur) frame.fillSmoothCircle(x, y, 3, COL_TEXT);
+    else frame.drawCircle(x, y, 2, COL_FAINT);
+  }
+}
+
 static void handleRoot() {
   String out = "claude-status display " FW_VERSION "\nIP " + WiFi.localIP().toString() + "\nlast push " +
                (st.valid ? String((millis() - st.rxMillis) / 1000) + "s ago" : String("never")) + "\n" +
                (tapReady ? "taps seen: " + String(doubleTapCount()) + " double, " + String(fiveTapCount()) + " five"
                          : String("no motion sensor: taps on the case don't work")) + "\n" +
-               macsLine() + "night mode " + describeNight(nightMode) +
+               macsLine() +
+#ifdef BOARD_WAVESHARE_TOUCH
+               "swipes seen: " + String(swipeLeftCount()) + " left, " + String(swipeRightCount()) +
+               " right (last gesture 0x" + String(lastTouchGesture(), HEX) + ")\n" +
+#endif
+               "night mode " + describeNight(nightMode) +
                (nightMode.enabled ? (nightActive(nightMode, time(nullptr)) ? " (on now)" : " (not now)") : "") +
                ", backlight " + String(brightness) + "\n";
   server.send(200, "text/plain", out);
@@ -1028,7 +1071,9 @@ static void paceTick(int r0, int r1, float gone) {
   frame.drawWedgeLine(CX + (r0 - 2) * c, CY + (r0 - 2) * s, CX + (r1 + 2) * c, CY + (r1 + 2) * s, 1.2f, 1.2f, COL_TEXT);
 }
 
-static void drawStatus(bool stale) {
+// The status screen for a state: the merged one, or with mac set, one Mac's own (a page you swipe
+// to). The parameter is named st on purpose, so it stands in for the global in what follows.
+static void drawStatus(const State &st, bool stale, const String *mac = nullptr) {
   frame.fillScreen(COL_BG);
   bool live = st.valid && !stale;
   bool usage = live && st.haveUsage;
@@ -1050,7 +1095,12 @@ static void drawStatus(bool stale) {
     localtime_r(&now, &t);
     char hm[6];
     strftime(hm, sizeof(hm), "%H:%M", &t);
-    text(hm, CX, 43, COL_DIM, &fonts::FreeSansBold9pt7b);
+    if (!mac) text(hm, CX, 43, COL_DIM, &fonts::FreeSansBold9pt7b);
+  }
+  if (mac) {  // a Mac's own page has its name where the time goes
+    frame.setFont(&fonts::FreeSansBold9pt7b);
+    text(fit(mac->length() ? *mac : String("Mac"), chordWidth(43, STATUS_TEXT_R)), CX, 43, COL_TEXT,
+         &fonts::FreeSansBold9pt7b);
   }
 
   // Pace ticks: usage past its tick will run out before the window resets
@@ -1059,6 +1109,12 @@ static void drawStatus(bool stale) {
     paceTick(96, 104, windowGone(st.d7Reset, D7_SECS, now));
   }
 
+  if (!live && mac) {
+    if (showCat) drawCat(frame, CX - CAT_W / 2, 62, CatMood::Sleeping);
+    text("Offline", CX, 110, COL_DIM, &fonts::FreeSansBold9pt7b);
+    text("seen " + duration((millis() - st.rxMillis) / 1000) + " ago", CX, 136, COL_FAINT, &fonts::Font2);
+    return;
+  }
   if (!live) {
     if (showCat) drawCat(frame, CX - CAT_W / 2, 62, CatMood::Sleeping);
     text(st.valid ? "Mac offline" : "Waiting for Mac", CX, 110, COL_DIM, &fonts::FreeSansBold9pt7b);
@@ -1704,6 +1760,13 @@ void loop() {
   doubles = d;
   fives = f;
 
+  // Swipes turn the status screen's pages: finger moving left shows the next one, like a phone
+  static uint32_t lefts = swipeLeftCount(), rights = swipeRightCount();
+  uint32_t sl = swipeLeftCount(), sr = swipeRightCount();
+  int swiped = (int)(sl - lefts) - (int)(sr - rights);
+  lefts = sl;
+  rights = sr;
+
   bool stale = st.valid && millis() - st.rxMillis > STALE_MS;
   bool night = nightActive(nightMode, time(nullptr));
   bool alertFirst = night && nightMode.alerts;
@@ -1745,11 +1808,19 @@ void loop() {
     card = pickCard(stale, alertFirst);
   }
 
+  bool statusShowing = !diagnosticsSince && !card.alert && !card.ci && !card.done;
+  if (swiped && statusShowing && !(millis() - darkChanged < TAP_DELAY_MS ? wasDark : dark)) turnPage(swiped);
+
   if (diagnosticsSince) drawDiagnostics(millis() - diagnosticsSince);
   else if (card.alert) drawAlert(*card.alert, card.waiting - 1);
   else if (card.ci) drawCI(st.ci);
   else if (card.done) drawDone(*card.done, st.done - 1);
-  else drawStatus(stale);
+  else {
+    int page = currentPage();
+    if (page < 0) drawStatus(st, stale);
+    else drawStatus(sources[page].state, millis() - sources[page].state.rxMillis > STALE_MS, &sources[page].name);
+    if (sources.size() >= 2) drawPageDots();
+  }
   if (openShownAt && millis() - openShownAt < 2500 && !diagnosticsSince) {
     frame.fillRoundRect(CX - 78, 198, 156, 20, 10, COL_TRACK);
     text("Opening on your Mac", CX, 208, COL_TEXT, &fonts::Font2);

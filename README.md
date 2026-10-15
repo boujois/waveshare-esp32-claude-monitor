@@ -432,6 +432,10 @@ One display can show up to four Macs at once, such as a desktop and a laptop. In
 - **Mac offline** only shows once every Mac has gone quiet for 30 seconds. A Mac that's asleep drops off the display within about 10 seconds of that, and its place is freed after 10 minutes.
 - **Updates over Wi-Fi** come from the Mac the display paired with first, so use its menu bar app to update. See [Updating](#updating).
 
+**Swipe between Macs (Waveshare touch board).** On the [touch version](https://www.waveshare.com/wiki/ESP32-S3-Touch-LCD-1.28) of the display, swipe across the status screen to see each Mac on its own. Swipe left for the next page, right for the previous one. The first page is all Macs together; after it comes one page per Mac, with its name at the top, its own sessions and today's activity, or **Offline** and when it was last seen. Dots at the bottom show which page you're on.
+
+Alerts and Done cards still come from every Mac, whichever page is showing, so nothing that needs you is missed. Swipes only turn pages on the status screen. If that Mac stops pushing for 10 minutes, the display goes back to all Macs. The display's status page (`http://claude-status.local/`) counts the swipes it has seen, which helps if they don't seem to register.
+
 Each Mac goes by its local hostname (**System Settings → General → Sharing**). Two Macs with the same name would count as one, so give them different names, or set `source_name` in [`config.json`](#mac-helper-configjson). The display's status page (`http://claude-status.local/`) lists the Macs it's hearing from.
 
 A display needs firmware from this version or later to merge Macs; older firmware shows whichever Mac pushed last. Helpers from before this version still work, and all count as one Mac.
