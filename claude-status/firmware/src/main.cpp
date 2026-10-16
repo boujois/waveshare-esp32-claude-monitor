@@ -43,6 +43,7 @@
 #include <vector>
 
 #include "cat.h"
+#include "glow.h"
 #include "night.h"
 #include "taps.h"
 
@@ -1639,6 +1640,7 @@ void setup() {
   }
 #endif
 
+  glowBegin();
   openBoot = esp_random() | 1;
   tapReady = tapsBegin(TAP_G);
 #ifdef BOARD_LILYGO_T_RGB
@@ -1929,6 +1931,16 @@ void loop() {
     darkChanged = millis();
   }
   if (peekSince) peekLitAt = millis();
+
+  // The LED strip (GLOW_PIN builds only) follows the card on screen; it's off while the screen is
+  // dark for the night and when there's nothing current to show.
+  Glow glow = nowDark || !st.valid || stale ? Glow::Off
+              : card.alert                  ? Glow::Waiting
+              : card.done                   ? Glow::Done
+              : st.haveUsage && st.h5 >= GLOW_WARN_PCT ? Glow::Warn
+              : st.busy > 0                 ? Glow::Working
+                                            : Glow::Idle;
+  glowShow(glow);
 
   delay(15);
 }
