@@ -11,6 +11,7 @@ ESP32 status display over Wi-Fi, or over its USB cable when Wi-Fi can't reach it
   * CI checks              the pull request for the session open in the Claude app (GitHub CLI)
   * Anthropic incidents    status.claude.com, for incidents affecting Claude Code
   * night mode (opt-in)    hours when the display's screen goes dark or dims
+  * now playing (opt-in)   the track playing in Spotify or Apple Music, with play/pause and skip
 
 The Claude Monitor menu bar app changes these options while the helper runs, through
 GET/POST /settings, POST /usage/connect and POST /usage/refresh on the same port.
@@ -22,6 +23,8 @@ Standard library only. Run directly or via the launchd agent (see install.sh).
 """
 
 import argparse
+import base64
+import hashlib
 import fcntl
 import json
 import os
@@ -38,7 +41,9 @@ import threading
 import time
 import unicodedata
 import urllib.error
+import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -82,6 +87,13 @@ DEFAULT_CONFIG = {
     "night_alerts": True,
     # When the display can't be reached over Wi-Fi, talk to it over its USB cable instead
     "usb_fallback": True,
+    # Now playing: the track playing in Spotify or Apple Music, on a screen a swipe away. Off by
+    # default: macOS asks once to let the helper control the player. music_covers: its album
+    # cover too (Spotify's is downloaded from Spotify's image server; kept in memory only).
+    # music_idle: the display switches to it by itself while no Claude session is working.
+    "music": False,
+    "music_covers": True,
+    "music_idle": True,
 }
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -1092,6 +1104,260 @@ class IncidentWatcher:
 
 
 # ---------------------------------------------------------------------------
+# Now playing (opt-in): Spotify or Apple Music, read and controlled with AppleScript
+# ---------------------------------------------------------------------------
+
+MUSIC_PLAYERS = {"spotify": "Spotify", "music": "Music"}  # our name -> app (and process) name
+_SEP = "character id 31"  # unit separator: can't be in a track name
+
+# Prints state, name, artist, duration (s), position (s), artwork id or URL, track id. Run only while
+# the app is running (checked first with pgrep), and asked again inside, so it never launches it.
+MUSIC_SCRIPTS = {
+    "spotify": f"""if application "Spotify" is running then
+  tell application "Spotify"
+    set st to player state as string
+    if st is "stopped" then return "stopped"
+    set t to current track
+    set d to {_SEP}
+    return st & d & (name of t) & d & (artist of t) & d & ((duration of t) / 1000 as string) & d & (player position as string) & d & (artwork url of t) & d & (id of t)
+  end tell
+end if
+return "" """,
+    "music": f"""if application "Music" is running then
+  tell application "Music"
+    set st to player state as string
+    if st is "stopped" then return "stopped"
+    set t to current track
+    set d to {_SEP}
+    return st & d & (name of t) & d & (artist of t) & d & (duration of t as string) & d & (player position as string) & d & "" & d & (persistent ID of t)
+  end tell
+end if
+return "" """,
+}
+
+# Apple Music's cover: the current track's artwork, written to the file given
+MUSIC_ART_SCRIPT = """on run argv
+  tell application "Music"
+    if (count of artworks of current track) is 0 then return "none"
+    set a to raw data of artwork 1 of current track
+  end tell
+  set f to open for access (POSIX file (item 1 of argv)) with write permission
+  try
+    set eof f to 0
+    write a to f
+  end try
+  close access f
+  return "ok"
+end run"""
+
+MUSIC_COMMANDS = {"prev": "previous track", "toggle": "playpause", "next": "next track"}
+COVER_HOSTS = (".scdn.co", ".spotifycdn.com")  # Spotify's image servers: the only covers fetched
+COVER_PX, COVER_MAX_BYTES, COVERS_KEPT = 96, 1 << 20, 20
+
+
+def _seconds(text):
+    """A number AppleScript printed, which uses a decimal comma in some regions."""
+    try:
+        return max(0.0, float(text.strip().replace(",", ".")))
+    except ValueError:
+        return 0.0
+
+
+def read_player(player):
+    """{"player", "playing", "title", "artist", "dur", "pos", "art_url", "track"} for what a player
+    has loaded, or None when it isn't running or has nothing."""
+    app = MUSIC_PLAYERS[player]
+    try:
+        if _run(["pgrep", "-xq", app], timeout=3).returncode != 0:
+            return None
+        res = _run(["osascript", "-e", MUSIC_SCRIPTS[player]], timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    out = res.stdout.rstrip("\n")
+    if res.returncode != 0:
+        return {"error": (res.stderr or "").strip()[:200]}
+    parts = out.split("\x1f")
+    if len(parts) != 7:
+        return None
+    state, title, artist, dur, pos, art_url, track = parts
+    return {"player": player, "playing": state == "playing", "title": title, "artist": artist,
+            "dur": _seconds(dur), "pos": _seconds(pos), "art_url": art_url, "track": track}
+
+
+def player_command(player, cmd):
+    """Previous/next track or play/pause, from a tap on the display."""
+    verb = MUSIC_COMMANDS.get(cmd)
+    if not verb or player not in MUSIC_PLAYERS:
+        return
+    try:
+        res = _run(["osascript", "-e", f'tell application "{MUSIC_PLAYERS[player]}" to {verb}'], timeout=5)
+        if res.returncode != 0:
+            log(f"couldn't {verb} in {MUSIC_PLAYERS[player]}:", (res.stderr or "").strip()[:200])
+    except (OSError, subprocess.TimeoutExpired) as e:
+        log(f"couldn't {verb}:", e)
+
+
+def shrink_cover(src, workdir):
+    """A small JPEG of an image file (made with sips), or None."""
+    out = os.path.join(workdir, "cover.jpg")
+    for quality in (70, 45):
+        try:
+            res = _run(["sips", "-s", "format", "jpeg", "-s", "formatOptions", str(quality),
+                        "-z", str(COVER_PX), str(COVER_PX), src, "--out", out], timeout=15)
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if res.returncode != 0 or not os.path.exists(out):
+            return None
+        data = Path(out).read_bytes()
+        if len(data) <= 5500:  # its base64 must fit the display's USB buffer in one go
+            return data
+    return None
+
+
+def fetch_cover(player, art_url):
+    """The current track's cover as a small JPEG, or None. Nothing is written anywhere but a
+    temporary folder that's deleted straight away."""
+    with tempfile.TemporaryDirectory(prefix="claude-monitor-") as tmp:
+        src = os.path.join(tmp, "original")
+        if player == "spotify":
+            host = urllib.parse.urlsplit(art_url).hostname or ""
+            if not art_url.startswith("https://") or not host.endswith(COVER_HOSTS):
+                return None
+            try:
+                with urllib.request.urlopen(art_url, timeout=10) as r:
+                    data = r.read(COVER_MAX_BYTES + 1)
+            except OSError as e:
+                log("couldn't fetch the album cover:", e)
+                return None
+            if len(data) > COVER_MAX_BYTES:
+                return None
+            Path(src).write_bytes(data)
+        else:
+            try:
+                res = _run(["osascript", "-e", MUSIC_ART_SCRIPT, src], timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+            if res.stdout.strip() != "ok" or not os.path.getsize(src):
+                return None
+        return shrink_cover(src, tmp)
+
+
+class MusicWatcher:
+    """Polls Spotify and Apple Music every couple of seconds while the music option is on, never
+    launching either. When both have a track, the one playing wins. Album covers are shrunk
+    straight away and kept in memory only, the last 20."""
+
+    INTERVAL = 2
+
+    def __init__(self, background=True):
+        self.enabled = True
+        self.covers_on = True
+        self.track = None  # read_player() of the player shown
+        self._anchor = (0.0, 0.0)  # (position, monotonic time it was read) while playing
+        self.covers = OrderedDict()  # art id -> JPEG bytes
+        self._cover_busy = set()
+        self._errors = set()
+        self.on_change = None
+        self.wake = threading.Event()
+        if background:
+            threading.Thread(target=self._run, daemon=True).start()
+
+    def set_enabled(self, on, covers):
+        self.covers_on = covers
+        if on != self.enabled:
+            self.enabled = on
+            if not on:
+                self.track = None
+                self.covers.clear()
+            self.wake.set()
+
+    def _run(self):
+        while True:
+            self.wake.clear()
+            if self.enabled:
+                self.poll()
+            self.wake.wait(self.INTERVAL if self.enabled else None)
+
+    def poll(self):
+        found = []
+        for player in MUSIC_PLAYERS:
+            t = read_player(player)
+            if t and "error" in t:
+                if t["error"] and player not in self._errors:
+                    log(f"couldn't read {MUSIC_PLAYERS[player]} (allow the helper to control it in "
+                        f"System Settings > Privacy & Security > Automation):", t["error"])
+                self._errors.add(player)
+            elif t:
+                found.append(t)
+        found.sort(key=lambda t: not t["playing"])  # the one playing first
+        old, new = self.track, found[0] if found else None
+        now = time.monotonic()
+        changed = (old or {}).get("track") != (new or {}).get("track") or \
+            (old or {}).get("playing") != (new or {}).get("playing")
+        if new:
+            # Keep the position it was read at unless it's drifted (a seek): fewer pushes
+            expected = self._anchor[0] + (now - self._anchor[1] if old and old.get("playing") else 0)
+            if changed or abs(new["pos"] - expected) > 2:
+                self._anchor = (new["pos"], now)
+            if self.covers_on and self.art_id(new) and self.art_id(new) not in self.covers:
+                self._get_cover(new)
+        self.track = new
+        if changed and self.on_change:
+            self.on_change()
+
+    @staticmethod
+    def art_id(t):
+        """A short name for a track's cover, the same for every track that shares it (Spotify)."""
+        if t["player"] == "spotify":
+            if not t["art_url"]:
+                return None
+            name = urllib.parse.urlsplit(t["art_url"]).path.rsplit("/", 1)[-1]
+        else:
+            name = t["track"]
+        return "c" + hashlib.sha1(name.encode()).hexdigest()[:15] if name else None
+
+    def _get_cover(self, t):
+        art = self.art_id(t)
+        if art in self._cover_busy:
+            return
+        self._cover_busy.add(art)
+
+        def get():
+            try:
+                data = fetch_cover(t["player"], t["art_url"])
+                if data and self.enabled:
+                    self.covers[art] = data
+                    while len(self.covers) > COVERS_KEPT:
+                        self.covers.popitem(last=False)
+                    if self.on_change:
+                        self.on_change()
+            finally:
+                self._cover_busy.discard(art)
+        threading.Thread(target=get, daemon=True).start()
+
+    def cover(self, art):
+        data = self.covers.get(art)
+        if data:
+            self.covers.move_to_end(art)
+        return data
+
+    def snapshot(self, covers, idle):
+        """The "music" object for the display, or None. Its "pos" moves on while playing; leave it
+        out when comparing states."""
+        t = self.track
+        if not t:
+            return None
+        pos = self._anchor[0] + (time.monotonic() - self._anchor[1] if t["playing"] else 0)
+        out = {"title": ascii_text(t["title"], 80), "artist": ascii_text(t["artist"], 80),
+               "player": t["player"], "playing": t["playing"], "dur": round(t["dur"], 1),
+               "pos": round(min(pos, t["dur"] or pos), 1), "auto": idle}
+        art = self.art_id(t) if covers else None
+        if art and art in self.covers:
+            out["art"] = art
+        return out
+
+
+# ---------------------------------------------------------------------------
 # Plan limits (opt-in)
 # ---------------------------------------------------------------------------
 
@@ -1570,6 +1836,12 @@ class Device:
         self.on_open = None
         self.tap_open = False
         self._open_seen = None
+        # Now playing: what the display shows ("view": "music" or "status"), the cover it has, and
+        # its play/pause/skip requests, which on_music(cmd) acts on like on_open
+        self.view = "status"
+        self.art = None
+        self.on_music = None
+        self._music_seen = None
 
     def _got_card(self, asked, reply):
         """Notes the card from the display's reply to a request sent at asked, unless a later
@@ -1583,6 +1855,35 @@ class Device:
             if asked >= self._card_asked:
                 self._card_asked, self.card = asked, card
         self._got_open(reply.get("open") if isinstance(reply, dict) else None)
+        if isinstance(reply, dict):
+            self.view = reply.get("view") if reply.get("view") in ("music", "status") else "status"
+            self.art = reply.get("art") if isinstance(reply.get("art"), str) else None
+            self._got_music(reply.get("music_cmd"))
+
+    def _got_music(self, req):
+        if not isinstance(req, dict) or not isinstance(req.get("seq"), int):
+            return
+        seen, now = self._music_seen, (req.get("boot"), req["seq"])
+        self._music_seen = now
+        mine = not req.get("src") or req.get("src") == self.source
+        if seen and seen[0] == now[0] and seen[1] != now[1] and self.on_music and mine:
+            threading.Thread(target=self.on_music, args=(str(req.get("cmd") or ""),), daemon=True).start()
+
+    def send_art(self, art, jpeg):
+        """Sends an album cover (a small JPEG) to the display, which keeps only the latest."""
+        body = f"{art} ".encode() + base64.b64encode(jpeg)
+        asked = time.monotonic()
+        if self.via == "usb":
+            reply = self._usb_request("/art", "@art", body)
+        else:
+            req = urllib.request.Request(self._url("/art"), data=body, method="POST",
+                                         headers={"Content-Type": "text/plain"})
+            with urllib.request.urlopen(req, timeout=5) as r:
+                reply = r.read()
+        try:
+            self._got_card(asked, json.loads(reply))
+        except ValueError:
+            pass
 
     def _got_open(self, req):
         if not isinstance(req, dict) or not isinstance(req.get("seq"), int):
@@ -1758,7 +2059,7 @@ class Device:
 # ---------------------------------------------------------------------------
 
 BOOL_SETTINGS = ("plan_usage", "cat", "ci_checks", "status_page", "chat_alerts", "check_replies",
-                 "night_mode", "night_alerts")
+                 "night_mode", "night_alerts", "music", "music_covers", "music_idle")
 SETTINGS = BOOL_SETTINGS + ("night_start", "night_end", "night_screen")
 CLOCK_TIME = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")  # 24-hour HH:MM
 
@@ -1976,7 +2277,7 @@ class Bridge:
         self.today = TodayStats()
         self.focus = FocusWatcher()
         self.usage = UsageWatcher(cfg["plan_usage_interval"], s["plan_usage"], background=not once)
-        self.chats = self.ci = self.incidents = None
+        self.chats = self.ci = self.incidents = self.music = None
         self.device = Device(cfg["device_host"], source_name(cfg), usb=cfg["usb_fallback"])
         self.tz = posix_timezone()
         self.key = device_key(cfg)
@@ -1986,6 +2287,8 @@ class Bridge:
         self.payload = None  # ...as sent, with its timestamp
         self.push_soon = False  # push on the next pass even if nothing changed
         self.device.on_open = open_session
+        self.device.on_music = self.music_command
+        self._art_tried = (None, 0)  # the cover last sent to the display, and when
 
     def settings(self):
         with self.lock:
@@ -2005,6 +2308,11 @@ class Bridge:
                 self.ci = CIWatcher(self.cfg["ci_passed_window"])
         elif self.ci:
             self.ci.watch(None)  # nothing to fetch while it's off
+        if s["music"] and not self.music:
+            self.music = MusicWatcher()
+            self.music.on_change = self.wake_push
+        if self.music:
+            self.music.set_enabled(s["music"], s["music_covers"])
         if s["status_page"] and not self.incidents:
             self.incidents = IncidentWatcher()
         elif self.incidents:
@@ -2063,6 +2371,35 @@ class Bridge:
             raise DisplayError("Update the display to open its sessions from here.")
         if not open_session(card["id"]):
             raise DisplayError("Couldn't find where that session is running.")
+
+    def wake_push(self):
+        self.push_soon = True
+
+    def music_command(self, cmd):
+        """A tap on the display's Now Playing screen: previous, play/pause or next."""
+        track = self.music and self.music.track
+        if not track:
+            return
+        player_command(track["player"], cmd)
+        self.music.wake.set()  # read the new track or state straight away
+
+    def send_cover(self, s):
+        """Sends the current album cover to the display when it doesn't have it yet."""
+        music = self.state.get("music")
+        art = music.get("art") if music else None
+        if not art or self.device.art == art or not self.device.ok:
+            return
+        now = time.monotonic()
+        if self._art_tried[0] == art and now - self._art_tried[1] < 15:
+            return  # it didn't take: try again in a while, not on every pass
+        self._art_tried = (art, now)
+        jpeg = self.music.cover(art)
+        if not jpeg:
+            return
+        try:
+            self.device.send_art(art, jpeg)
+        except (OSError, ValueError) as e:
+            log("couldn't send the album cover:", e)
 
     def watch_card(self):
         """The menu bar app is looking. A card dismissed on the display (a double tap) goes
@@ -2180,6 +2517,15 @@ class Bridge:
                     log("status page check failed:", e)
         if incident:
             state["incident"] = incident
+        # Now playing in Spotify or Apple Music
+        if s["music"]:
+            if self.once and not self.music:
+                self.music = MusicWatcher(background=False)
+                self.music.covers_on = False
+                self.music.poll()
+            music = self.music.snapshot(s["music_covers"], s["music_idle"]) if self.music else None
+            if music:
+                state["music"] = music
         # Offer an update when the helper or the display is behind the latest release
         update = self.update_available()
         if update:
@@ -2215,12 +2561,14 @@ class Bridge:
                 print(json.dumps(state, indent=2))
                 return
 
-            body = json.dumps(state, separators=(",", ":"))
+            # A playing track's position moves on every pass: not a change worth a push by itself
+            music = state.get("music")
+            body = json.dumps({**state, "music": {**music, "pos": 0}} if music else state, separators=(",", ":"))
             payload = json.dumps({**state, "t": int(now)}, separators=(",", ":")).encode()
             self.state, self.payload = state, payload
             due = body != last_sent or now - last_push >= cfg["heartbeat_interval"] or self.push_soon
             # A tap on a touch screen's card waits for the next push to reach the Mac: push every pass
-            due = due or (self.device.tap_open and self.device.card is not None)
+            due = due or (self.device.tap_open and (self.device.card is not None or self.device.view == "music"))
             if self.device.ok is False and now - last_push < 5:
                 due = False  # device unreachable: retry every few seconds, not every loop
             if due:
@@ -2231,6 +2579,8 @@ class Bridge:
                     last_sent = body
                     if was_ok is False:
                         self.display["next"] = 0  # back after a restart (an update?): read /info again
+            if self.music and state.get("music"):
+                self.send_cover(s)
             time.sleep(cfg["push_interval"])
 
 
