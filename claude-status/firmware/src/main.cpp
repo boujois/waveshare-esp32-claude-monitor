@@ -36,6 +36,7 @@
 #include <esp_system.h>
 #include <esp_timer.h>
 #include <mbedtls/base64.h>
+#include <AnimatedGIF.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -423,6 +424,7 @@ struct CI {
 struct Music {
   bool present = false, playing = false, autoIdle = true;
   String title, artist, player, art, src;  // art: the cover's id, when the Mac has one
+  String gif;  // with nothing playing: the GIF to show instead (its id)
   float pos = 0, dur = 0;                   // seconds, pos as of at
   uint32_t at = 0;
 };
@@ -660,6 +662,7 @@ static String applyState(const String &body) {
     s.music.artist = (const char *)(mu["artist"] | "");
     s.music.player = (const char *)(mu["player"] | "");
     s.music.art = (const char *)(mu["art"] | "");
+    s.music.gif = (const char *)(mu["gif"] | "");
     s.music.playing = mu["playing"] | false;
     s.music.autoIdle = mu["auto"] | true;
     s.music.pos = mu["pos"] | 0.0f;
@@ -1224,7 +1227,124 @@ static void drawSkip(int x, int y, int dir, uint32_t col) {  // dir -1: previous
   frame.fillRect(dir > 0 ? x + 4 : x - 6, y - 7, 3, 15, col);
 }
 
+// ---- A GIF for when nothing's playing ----
+// The Mac sends it (POST /gif?id=...&size=..., multipart, Wi-Fi only); it's kept in PSRAM, only the
+// latest, and played frame by frame into gifSprite, a canvas up to 240x240 (bigger ones are cropped).
+static AnimatedGIF *gifDecoder = nullptr;
+static uint8_t *gifData = nullptr;
+static size_t gifSize = 0, gifGot = 0;
+static bool gifOpen = false, gifUploadOk = false;
+static String gifLoaded, gifIncoming;
+static LGFX_Sprite gifSprite;
+static uint32_t gifNextAt = 0;
+constexpr size_t GIF_MAX = 1536 * 1024;
+
+static void gifDraw(GIFDRAW *d) {
+  int y = d->iY + d->y, w = gifSprite.width();
+  if (y < 0 || y >= gifSprite.height()) return;
+  uint16_t *row = (uint16_t *)gifSprite.getBuffer() + y * w;
+  const uint8_t *px = d->pPixels;
+  const uint16_t *pal = d->pPalette;  // big-endian RGB565, as LovyanGFX keeps 16-bit sprites
+  for (int x = 0; x < d->iWidth; x++) {
+    int sx = d->iX + x;
+    if (sx < 0 || sx >= w) continue;
+    uint8_t c = px[x];
+    if (d->ucHasTransparency && c == d->ucTransparent) continue;
+    row[sx] = pal[c];
+  }
+}
+
+static void gifClose() {
+  if (gifOpen) gifDecoder->close();
+  gifOpen = false;
+  gifLoaded = "";
+}
+
+static bool gifStart() {
+  if (!gifDecoder) {
+    gifDecoder = new AnimatedGIF();
+    gifDecoder->begin(GIF_PALETTE_RGB565_BE);
+  }
+  if (!gifDecoder->open(gifData, gifSize, gifDraw)) return false;
+  int w = min(gifDecoder->getCanvasWidth(), 240), h = min(gifDecoder->getCanvasHeight(), 240);
+  if (gifSprite.getBuffer() && (gifSprite.width() != w || gifSprite.height() != h)) gifSprite.deleteSprite();
+  if (!gifSprite.getBuffer()) {
+    gifSprite.setColorDepth(16);
+    gifSprite.setPsram(true);
+    if (!gifSprite.createSprite(w, h)) {
+      gifDecoder->close();
+      return false;
+    }
+  }
+  gifSprite.fillScreen(COL_BG);
+  gifOpen = true;
+  gifNextAt = 0;
+  return true;
+}
+
+static void handleGifUpload() {
+  HTTPUpload &up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    gifClose();
+    size_t size = server.arg("size").toInt();
+    gifIncoming = server.arg("id");
+    gifUploadOk = size > 0 && size <= GIF_MAX && gifIncoming.length() && gifIncoming.length() <= 40;
+    if (gifUploadOk && gifData && size > gifSize) {
+      free(gifData);
+      gifData = nullptr;
+    }
+    if (gifUploadOk && !gifData) gifData = (uint8_t *)ps_malloc(size);
+    gifUploadOk = gifUploadOk && gifData;
+    gifSize = size;
+    gifGot = 0;
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (!gifUploadOk || gifGot + up.currentSize > gifSize) {
+      gifUploadOk = false;
+      return;
+    }
+    memcpy(gifData + gifGot, up.buf, up.currentSize);
+    gifGot += up.currentSize;
+  } else if (up.status == UPLOAD_FILE_END) {
+    gifUploadOk = gifUploadOk && gifGot == gifSize && gifStart();
+    if (gifUploadOk) gifLoaded = gifIncoming;
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    gifUploadOk = false;
+  }
+}
+
+static void handleGifDone() {
+  if (!gifUploadOk) {
+    server.send(400, "text/plain", "bad gif");
+    return;
+  }
+  Serial.println("GIF loaded: " + gifLoaded + " (" + String(gifSize / 1024) + " KB)");
+  JsonDocument reply;
+  reply["ok"] = true;
+  server.send(200, "application/json", cardReply(reply));
+}
+
+// Draws the GIF's current frame in the middle of the screen, moving on when that frame's time is up
+static void drawGif() {
+  if (millis() >= gifNextAt) {
+    int delayMs = 100;
+    int more = gifDecoder->playFrame(false, &delayMs);
+    if (more < 0) {  // broken: stop
+      gifClose();
+      return;
+    }
+    if (more == 0) gifDecoder->reset();  // the last frame: loop
+    gifNextAt = millis() + max(20, delayMs);
+  }
+  gifSprite.pushSprite(&frame, CX - gifSprite.width() / 2, CY - gifSprite.height() / 2);
+}
+
 static void drawMusic(const Music &m) {
+  if (!m.title.length() && m.gif.length()) {  // nothing playing: the GIF
+    frame.fillScreen(COL_BG);
+    if (gifOpen && m.gif == gifLoaded) drawGif();
+    else text("Nothing playing", CX, CY, COL_FAINT, &fonts::FreeSans9pt7b);
+    return;
+  }
   frame.fillScreen(COL_BG);
   uint32_t accent = m.player == "music" ? 0xFA2D48 : 0x1DB954;  // Apple Music pink, Spotify green
   float pos = m.pos + (m.playing ? (millis() - m.at) / 1000.0f : 0);
@@ -1691,6 +1811,7 @@ static String cardReply(JsonDocument &reply) {
   // Now playing: what's on screen, the cover the display has, and the controls last tapped
   reply["view"] = !key.length() && pageMusic && musicAvailable() ? "music" : "status";
   reply["art"] = artLoaded;
+  reply["gif"] = gifLoaded;
   JsonObject mc = reply["music_cmd"].to<JsonObject>();
   mc["boot"] = openBoot;
   mc["seq"] = musicSeq;
@@ -1882,6 +2003,7 @@ void setup() {
   server.on("/screen.bmp", HTTP_GET, handleScreenshot);
   server.on("/dismiss", HTTP_POST, handleDismiss);
   server.on("/art", HTTP_POST, handleArt);
+  server.on("/gif", HTTP_POST, handleGifDone, handleGifUpload);
   server.on("/wifi/reset", HTTP_POST, handleWifiReset);
   server.on("/brightness", handleBrightness);
 #ifdef BOARD_LILYGO_T_RGB
@@ -2089,14 +2211,15 @@ void loop() {
   // and goes again once a session starts working
   static bool idleMusicBefore = false;
   bool claudeIdle = st.busy == 0 && st.waiting == 0;
-  bool idleMusic = claudeIdle && musicAvailable() && st.music.playing && st.music.autoIdle;
+  bool idleMusic = claudeIdle && musicAvailable() && st.music.autoIdle &&
+                   (st.music.playing || (!st.music.title.length() && st.music.gif.length()));
   if (idleMusic && !idleMusicBefore && !pageMusic) pageMusic = musicAuto = true;
   if (!claudeIdle && musicAuto) pageMusic = musicAuto = false;
   idleMusicBefore = idleMusic;
 
   // Its controls: a tap on previous, play/pause or next (touch screens), or a double tap or BOOT
   // press anywhere for play/pause. dismiss has nothing to do here: no card is showing.
-  bool onMusic = statusShowing && pageMusic && musicAvailable() && !lookedDark;
+  bool onMusic = statusShowing && pageMusic && musicAvailable() && st.music.title.length() && !lookedDark;
   if (onMusic && (openTap || dismiss)) {
     int tx, ty;
     musicCmd = openTap && !dismiss && lastTapPoint(&tx, &ty) ? musicZone(tx) : String("toggle");

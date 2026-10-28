@@ -94,6 +94,14 @@ DEFAULT_CONFIG = {
     "music": False,
     "music_covers": True,
     "music_idle": True,
+    # With nothing playing (or paused for 2 minutes), Now playing shows a GIF from Giphy instead,
+    # picked at random every gif_minutes from gifs (Giphy links or ids). With a Giphy API key
+    # (free from developers.giphy.com), it picks from a search for giphy_search instead.
+    "music_gif": True,
+    "gifs": ["https://giphy.com/gifs/hello-hi-wave-xT9IgG50Fb7Mi0prBC"],
+    "giphy_api_key": "",
+    "giphy_search": "hello hi wave",
+    "gif_minutes": 10,
 }
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
@@ -1253,6 +1261,7 @@ class MusicWatcher:
         self.enabled = True
         self.covers_on = True
         self.track = None  # read_player() of the player shown
+        self.paused_since = None  # monotonic time it stopped playing
         self._anchor = (0.0, 0.0)  # (position, monotonic time it was read) while playing
         self.covers = OrderedDict()  # art id -> JPEG bytes
         self._cover_busy = set()
@@ -1302,6 +1311,7 @@ class MusicWatcher:
             if self.covers_on and self.art_id(new) and self.art_id(new) not in self.covers:
                 self._get_cover(new)
         self.track = new
+        self.paused_since = None if not new or new["playing"] else (self.paused_since or now)
         if changed and self.on_change:
             self.on_change()
 
@@ -1341,11 +1351,15 @@ class MusicWatcher:
             self.covers.move_to_end(art)
         return data
 
-    def snapshot(self, covers, idle):
+    PAUSED_HIDE = 120  # seconds paused before the GIF takes over, when there is one
+
+    def snapshot(self, covers, idle, hide_paused=False):
         """The "music" object for the display, or None. Its "pos" moves on while playing; leave it
         out when comparing states."""
         t = self.track
         if not t:
+            return None
+        if hide_paused and self.paused_since and time.monotonic() - self.paused_since > self.PAUSED_HIDE:
             return None
         pos = self._anchor[0] + (time.monotonic() - self._anchor[1] if t["playing"] else 0)
         out = {"title": ascii_text(t["title"], 80), "artist": ascii_text(t["artist"], 80),
@@ -1355,6 +1369,101 @@ class MusicWatcher:
         if art and art in self.covers:
             out["art"] = art
         return out
+
+
+GIF_MAX_BYTES = 1536 * 1024  # what the display keeps room for
+GIF_RENDITIONS = ("200w.gif", "200w_d.gif", "100.gif")  # Giphy's smaller versions, 200 wide first
+GIPHY_ID = re.compile(r"[A-Za-z0-9]{6,40}")
+
+
+def giphy_id(link):
+    """The id in a Giphy link (https://giphy.com/gifs/hello-hi-wave-xT9IgG50Fb7Mi0prBC) or an id."""
+    if not isinstance(link, str):
+        return None
+    path = urllib.parse.urlsplit(link.strip()).path.rstrip("/")
+    for part in reversed(path.split("/")):
+        cand = part.rsplit("-", 1)[-1]
+        if cand not in ("giphy.gif", "gifs", "media") and GIPHY_ID.fullmatch(cand):
+            return cand
+    return None
+
+
+def fetch_gif(gid):
+    """A small version of a Giphy GIF, or None."""
+    for rendition in GIF_RENDITIONS:
+        try:
+            with urllib.request.urlopen(f"https://media.giphy.com/media/{gid}/{rendition}", timeout=20) as r:
+                data = r.read(GIF_MAX_BYTES + 1)
+        except OSError as e:
+            log(f"couldn't fetch GIF {gid}/{rendition}:", e)
+            continue
+        if len(data) <= GIF_MAX_BYTES and data[:4] == b"GIF8":
+            return data
+    return None
+
+
+class GifWatcher:
+    """Picks a GIF for when nothing's playing, at random every gif_minutes, and downloads it from
+    Giphy. Only the current one is kept, in memory."""
+
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.enabled = True
+        self.current = None  # (id, GIF bytes)
+        self._search = ([], 0)  # ids from a Giphy search, and when
+        self.on_change = None
+        self.wake = threading.Event()
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def set_enabled(self, on):
+        if on != self.enabled:
+            self.enabled = on
+            if not on:
+                self.current = None
+            self.wake.set()
+
+    def _choices(self):
+        key, query = self.cfg.get("giphy_api_key"), self.cfg.get("giphy_search")
+        if key and query:
+            ids, at = self._search
+            if not ids or time.time() - at > 24 * 3600:
+                url = "https://api.giphy.com/v1/gifs/search?" + urllib.parse.urlencode(
+                    {"api_key": key, "q": query, "limit": 50, "rating": "g"})
+                try:
+                    with urllib.request.urlopen(url, timeout=15) as r:
+                        found = [giphy_id(g.get("id")) for g in json.load(r).get("data", [])]
+                    self._search = ids, at = [g for g in found if g], time.time()
+                except (OSError, ValueError, AttributeError) as e:
+                    log("Giphy search failed:", e)
+            if ids:
+                return ids
+        gifs = self.cfg.get("gifs") or []
+        return [g for g in (giphy_id(x) for x in (gifs if isinstance(gifs, list) else [gifs])) if g]
+
+    def _run(self):
+        while True:
+            self.wake.clear()
+            wait = None
+            if self.enabled:
+                wait = max(1, float(self.cfg.get("gif_minutes") or 10)) * 60
+                choices = self._choices()
+                if not choices:
+                    wait = 300
+                elif not self.current or self.current[0] not in choices or len(choices) > 1:
+                    others = [c for c in choices if not self.current or c != self.current[0]]
+                    gid = secrets.choice(others or choices)
+                    data = fetch_gif(gid)
+                    if data and self.enabled:
+                        self.current = (gid, data)
+                        if self.on_change:
+                            self.on_change()
+                    elif not data:
+                        wait = 300
+            self.wake.wait(wait)
+
+    def snapshot(self):
+        cur = self.current
+        return cur[0] if cur else None
 
 
 # ---------------------------------------------------------------------------
@@ -1840,6 +1949,7 @@ class Device:
         # its play/pause/skip requests, which on_music(cmd) acts on like on_open
         self.view = "status"
         self.art = None
+        self.gif = None
         self.on_music = None
         self._music_seen = None
 
@@ -1858,6 +1968,7 @@ class Device:
         if isinstance(reply, dict):
             self.view = reply.get("view") if reply.get("view") in ("music", "status") else "status"
             self.art = reply.get("art") if isinstance(reply.get("art"), str) else None
+            self.gif = reply.get("gif") if isinstance(reply.get("gif"), str) else None
             self._got_music(reply.get("music_cmd"))
 
     def _got_music(self, req):
@@ -1880,6 +1991,24 @@ class Device:
                                          headers={"Content-Type": "text/plain"})
             with urllib.request.urlopen(req, timeout=5) as r:
                 reply = r.read()
+        try:
+            self._got_card(asked, json.loads(reply))
+        except ValueError:
+            pass
+
+    def send_gif(self, gid, data):
+        """Sends a GIF for the Now playing screen (Wi-Fi only: it's too big for the USB link)."""
+        if self.via == "usb":
+            raise OSError("GIFs only go over Wi-Fi")
+        boundary = "claude-monitor-" + secrets.token_hex(8)
+        body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"gif\"; filename=\"idle.gif\"\r\n"
+                f"Content-Type: image/gif\r\n\r\n").encode() + data + f"\r\n--{boundary}--\r\n".encode()
+        query = urllib.parse.urlencode({"id": gid, "size": len(data)})
+        req = urllib.request.Request(self._url(f"/gif?{query}"), data=body, method="POST", headers={
+            "Content-Type": f"multipart/form-data; boundary={boundary}"})
+        asked = time.monotonic()
+        with urllib.request.urlopen(req, timeout=60) as r:
+            reply = r.read()
         try:
             self._got_card(asked, json.loads(reply))
         except ValueError:
@@ -2059,7 +2188,7 @@ class Device:
 # ---------------------------------------------------------------------------
 
 BOOL_SETTINGS = ("plan_usage", "cat", "ci_checks", "status_page", "chat_alerts", "check_replies",
-                 "night_mode", "night_alerts", "music", "music_covers", "music_idle")
+                 "night_mode", "night_alerts", "music", "music_covers", "music_idle", "music_gif")
 SETTINGS = BOOL_SETTINGS + ("night_start", "night_end", "night_screen")
 CLOCK_TIME = re.compile(r"([01][0-9]|2[0-3]):[0-5][0-9]")  # 24-hour HH:MM
 
@@ -2277,7 +2406,7 @@ class Bridge:
         self.today = TodayStats()
         self.focus = FocusWatcher()
         self.usage = UsageWatcher(cfg["plan_usage_interval"], s["plan_usage"], background=not once)
-        self.chats = self.ci = self.incidents = self.music = None
+        self.chats = self.ci = self.incidents = self.music = self.gifs = None
         self.device = Device(cfg["device_host"], source_name(cfg), usb=cfg["usb_fallback"])
         self.tz = posix_timezone()
         self.key = device_key(cfg)
@@ -2289,6 +2418,7 @@ class Bridge:
         self.device.on_open = open_session
         self.device.on_music = self.music_command
         self._art_tried = (None, 0)  # the cover last sent to the display, and when
+        self._gif_tried = (None, 0)  # ...and the GIF
 
     def settings(self):
         with self.lock:
@@ -2313,6 +2443,11 @@ class Bridge:
             self.music.on_change = self.wake_push
         if self.music:
             self.music.set_enabled(s["music"], s["music_covers"])
+        if s["music"] and s["music_gif"] and not self.gifs:
+            self.gifs = GifWatcher(self.cfg)
+            self.gifs.on_change = self.wake_push
+        if self.gifs:
+            self.gifs.set_enabled(s["music"] and s["music_gif"])
         if s["status_page"] and not self.incidents:
             self.incidents = IncidentWatcher()
         elif self.incidents:
@@ -2400,6 +2535,24 @@ class Bridge:
             self.device.send_art(art, jpeg)
         except (OSError, ValueError) as e:
             log("couldn't send the album cover:", e)
+
+    def send_gif(self):
+        """Sends the GIF to the display when it doesn't have it yet (over Wi-Fi)."""
+        music = self.state.get("music")
+        gid = music.get("gif") if music else None
+        cur = self.gifs.current if self.gifs else None
+        if not gid or not cur or cur[0] != gid or self.device.gif == gid or not self.device.ok \
+                or self.device.via != "wifi":
+            return
+        now = time.monotonic()
+        if self._gif_tried[0] == gid and now - self._gif_tried[1] < 60:
+            return
+        self._gif_tried = (gid, now)
+        try:
+            self.device.send_gif(gid, cur[1])
+            log(f"sent GIF {gid} ({len(cur[1]) // 1024} KB)")
+        except (OSError, ValueError) as e:
+            log("couldn't send the GIF:", e)
 
     def watch_card(self):
         """The menu bar app is looking. A card dismissed on the display (a double tap) goes
@@ -2523,9 +2676,13 @@ class Bridge:
                 self.music = MusicWatcher(background=False)
                 self.music.covers_on = False
                 self.music.poll()
-            music = self.music.snapshot(s["music_covers"], s["music_idle"]) if self.music else None
+            gif = self.gifs.snapshot() if self.gifs and s["music_gif"] else None
+            music = self.music.snapshot(s["music_covers"], s["music_idle"], hide_paused=bool(gif)) \
+                if self.music else None
             if music:
                 state["music"] = music
+            elif gif:  # nothing playing: a GIF instead
+                state["music"] = {"gif": gif, "auto": s["music_idle"]}
         # Offer an update when the helper or the display is behind the latest release
         update = self.update_available()
         if update:
@@ -2581,6 +2738,8 @@ class Bridge:
                         self.display["next"] = 0  # back after a restart (an update?): read /info again
             if self.music and state.get("music"):
                 self.send_cover(s)
+            if self.gifs and state.get("music"):
+                self.send_gif()
             time.sleep(cfg["push_interval"])
 
 
