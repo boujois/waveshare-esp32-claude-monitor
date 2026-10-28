@@ -17,6 +17,12 @@ struct PanelView: View {
                     ("Cat", "cat"), ("CI checks", "ci_checks"), ("Anthropic incidents", "status_page"),
                 ])
                 SectionDivider()
+                ToggleSection(model: model, title: "Now playing", section: .music, rows: [
+                    ("Spotify / Apple Music", "music"), ("Album covers", "music_covers"),
+                    ("Show when Claude's idle", "music_idle"),
+                    ("GIF when nothing's playing", "music_gif"),
+                ])
+                SectionDivider()
                 ToggleSection(model: model, title: "Alerts", section: .alerts, rows: [
                     ("Claude app chat alerts", "chat_alerts"), ("Check replies with Haiku", "check_replies"),
                 ])

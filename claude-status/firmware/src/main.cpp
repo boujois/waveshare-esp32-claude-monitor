@@ -35,6 +35,8 @@
 #include <WiFiManager.h>
 #include <esp_system.h>
 #include <esp_timer.h>
+#include <mbedtls/base64.h>
+#include <AnimatedGIF.h>
 #include <sys/time.h>
 #include <time.h>
 
@@ -216,6 +218,8 @@ class TRGBDisplay {
     int16_t x, y;
     return panel.getPoint(&x, &y, 1) > 0;
   }
+  // Where the screen is touched, in panel pixels (0-479), if it is
+  bool touchPoint(int16_t &x, int16_t &y) { return panel.getPoint(&x, &y, 1) > 0; }
   int model() { return (int)panel.getModel(); }
 
   // Diagnostic (build with -DTRGB_TEST_PATTERN): six colour stripes. The left half is written
@@ -295,24 +299,58 @@ constexpr bool TAP_TO_OPEN = true;  // a single tap on a card opens its session 
 // The T-RGB has no motion sensor, so the gestures that are taps on the Waveshare's case are taps
 // on the screen here: a run of touches 60-450 ms apart; exactly one is a single tap and exactly two a
 // double tap (each counted once the run is over), and the fifth touch counts as five taps straight away.
+// A touch that moves sideways far enough before it lifts is a swipe instead, and isn't a tap.
 namespace touchtaps {
 constexpr uint32_t POLL_MS = 10, GAP_MIN = 60, GAP_MAX = 450;
-volatile uint32_t singles = 0, doubles = 0, fives = 0;
+constexpr uint32_t LIFT_POLLS = 3;      // the controller misses a sample now and then mid-swipe
+constexpr int SWIPE_PX = 90;            // of the panel's 480
+constexpr uint32_t SWIPE_MAX_MS = 900;
+volatile uint32_t singles = 0, doubles = 0, fives = 0, swipesLeft = 0, swipesRight = 0;
+volatile int tapX = -1, tapY = -1;  // where the last single tap was, in 240-pixel screen space
 
 void watch(void *) {
   bool wasDown = false;
-  uint32_t lastTap = 0, run = 0;
+  uint32_t lastTap = 0, run = 0, upPolls = 0, downAt = 0;
+  int16_t x0 = 0, y0 = 0, x1 = 0, y1 = 0, runX = -1, runY = -1;
   for (;;) {
     uint32_t now = millis();
-    bool down = lcd.touched();
-    if (down && !wasDown && (run == 0 || now - lastTap >= GAP_MIN)) {
-      run = (run && now - lastTap <= GAP_MAX) ? run + 1 : 1;
-      lastTap = now;
-      if (run == 5) fives = fives + 1;
+    int16_t x, y;
+    bool raw = lcd.touchPoint(x, y);
+    if (raw) {
+      upPolls = 0;
+      x1 = x;
+      y1 = y;
+    }
+    bool down = raw || (wasDown && ++upPolls < LIFT_POLLS);
+    if (down && !wasDown) {
+      x0 = x1;
+      y0 = y1;
+      downAt = now;
+      if (run == 0 || now - lastTap >= GAP_MIN) {
+        run = (run && now - lastTap <= GAP_MAX) ? run + 1 : 1;
+        lastTap = now;
+        if (run == 1) {
+          runX = x0 / 2;
+          runY = y0 / 2;
+        }
+        if (run == 5) fives = fives + 1;
+      }
+    }
+    if (!down && wasDown) {  // lifted: a swipe if it moved far enough sideways, quickly enough
+      int dx = x1 - x0, dy = y1 - y0;
+      if (abs(dx) >= SWIPE_PX && abs(dx) > 2 * abs(dy) && now - downAt <= SWIPE_MAX_MS) {
+        if (dx < 0) swipesLeft = swipesLeft + 1;
+        else swipesRight = swipesRight + 1;
+        if (run) run--;  // ...not a tap
+      }
     }
     wasDown = down;
-    if (run && now - lastTap > GAP_MAX) {
-      if (run == 1) singles = singles + 1;
+    if (run && !down && now - lastTap > GAP_MAX) {
+      if (run == 1) {
+        tapX = runX;
+        tapY = runY;
+        singles = singles + 1;
+      }
       if (run == 2) doubles = doubles + 1;
       run = 0;
     }
@@ -327,9 +365,14 @@ bool tapsBegin(float) {
 uint32_t singleTapCount() { return touchtaps::singles; }
 uint32_t doubleTapCount() { return touchtaps::doubles; }
 uint32_t fiveTapCount() { return touchtaps::fives; }
-uint32_t swipeLeftCount() { return 0; }  // swipes are read on the Waveshare touch board only, so far
-uint32_t swipeRightCount() { return 0; }
+uint32_t swipeLeftCount() { return touchtaps::swipesLeft; }
+uint32_t swipeRightCount() { return touchtaps::swipesRight; }
 uint8_t lastTouchGesture() { return 0; }
+bool lastTapPoint(int *x, int *y) {
+  *x = touchtaps::tapX;
+  *y = touchtaps::tapY;
+  return *x >= 0;
+}
 
 #endif  // BOARD_LILYGO_T_RGB
 
@@ -377,6 +420,15 @@ struct CI {
   uint32_t since = 0;  // when the run started (while running) or finished
 };
 
+// Now playing in Spotify or Apple Music on that Mac
+struct Music {
+  bool present = false, playing = false, autoIdle = true;
+  String title, artist, player, art, src;  // art: the cover's id, when the Mac has one
+  String gif;  // with nothing playing: the GIF to show instead (its id)
+  float pos = 0, dur = 0;                   // seconds, pos as of at
+  uint32_t at = 0;
+};
+
 struct State {
   bool valid = false;
   uint32_t rxMillis = 0;
@@ -391,6 +443,7 @@ struct State {
   String update;    // newer release available, e.g. "v1.1.0"
   String incident;  // an Anthropic incident affecting Claude Code, from status.claude.com
   CI ci;
+  Music music;
 };
 
 static State st;  // what's on screen: every Mac's latest push, merged (see mergeSources())
@@ -412,6 +465,14 @@ static String dismissedCI;                      // the CI card's key when you la
 static uint32_t openSeq = 0, openBoot = 0, openShownAt = 0;
 static String openId, openSrc;  // openSrc: the Mac that session runs on, so only it opens it
 static bool tapReady = false;                   // the motion sensor was found, so taps on the case work
+// Now playing: the page a swipe away, its controls and the album cover (only the latest is kept).
+// The Mac acts on musicCmd when musicSeq changes, like openSeq.
+static bool pageMusic = false;
+static uint32_t musicSeq = 0, musicTapAt = 0;
+static String musicCmd;
+static String artLoaded;  // the id of the cover in artSprite
+static LGFX_Sprite artSprite;
+constexpr int ART = 96;
 static WiFiManager wifiManager;
 static Preferences prefs;
 #ifdef BOARD_LILYGO_T_RGB
@@ -528,6 +589,7 @@ static void mergeSources() {
     if (!m.update.length()) m.update = s.update;
     if (!m.incident.length()) m.incident = s.incident;
     if (!m.ci.present && s.ci.present) m.ci = s.ci;
+    if (s.music.present && (!m.music.present || (s.music.playing && !m.music.playing))) m.music = s.music;
   }
   auto rank = [](const String &state) {
     return state == "waiting" ? 0 : state == "busy" ? 1 : state == "error" ? 2 : state == "done" ? 3 : 4;
@@ -593,6 +655,21 @@ static String applyState(const String &body) {
   }
   s.update = (const char *)(doc["update"] | "");
   if (!doc["incident"].isNull()) s.incident = (const char *)(doc["incident"]["name"] | "Claude incident");
+  JsonObject mu = doc["music"];
+  if (!mu.isNull()) {
+    s.music.present = true;
+    s.music.title = (const char *)(mu["title"] | "");
+    s.music.artist = (const char *)(mu["artist"] | "");
+    s.music.player = (const char *)(mu["player"] | "");
+    s.music.art = (const char *)(mu["art"] | "");
+    s.music.gif = (const char *)(mu["gif"] | "");
+    s.music.playing = mu["playing"] | false;
+    s.music.autoIdle = mu["auto"] | true;
+    s.music.pos = mu["pos"] | 0.0f;
+    s.music.dur = mu["dur"] | 0.0f;
+    s.music.at = millis();
+    s.music.src = src;
+  }
   size_t from = storeSource(src, std::move(s));
   mergeSources();
 
@@ -710,6 +787,10 @@ static String macsLine() {
 // still come from every Mac, whichever page is showing, so nothing that needs you is missed.
 static bool pageAll = true;  // the merged page
 static String pageMac;       // otherwise, the Mac whose page it is
+static bool musicAuto = false;  // the music page came up by itself, while Claude was idle
+
+// A Mac that's still pushing says what's playing: the Now Playing page is there, after the others
+static bool musicAvailable() { return st.music.present && st.valid && millis() - st.rxMillis <= STALE_MS; }
 
 // The page showing now: -1 for all Macs, else an index into sources
 static int currentPage() {
@@ -720,18 +801,31 @@ static int currentPage() {
   return -1;
 }
 
-// Moves by steps pages (+1 next, -1 previous), wrapping around: all Macs, then each Mac in turn
+static int pageCount() { return 1 + (sources.size() >= 2 ? sources.size() : 0) + (musicAvailable() ? 1 : 0); }
+
+// The page showing, from 0: all Macs, each Mac (with two or more), then Now Playing
+static int pageIndex() {
+  if (pageMusic && musicAvailable()) return pageCount() - 1;
+  pageMusic = false;
+  return currentPage() + 1;
+}
+
+// Moves by steps pages (+1 next, -1 previous), wrapping around: all Macs, then each Mac in turn,
+// then Now Playing
 static void turnPage(int steps) {
-  int n = sources.size() + 1;
-  if (n < 3) return;
-  int p = ((currentPage() + 1 + steps) % n + n) % n;
+  int n = pageCount();
+  if (n < 2) return;
+  int p = ((pageIndex() + steps) % n + n) % n;
+  pageMusic = musicAvailable() && p == n - 1;
+  musicAuto = false;
+  if (pageMusic) return;
   pageAll = p == 0;
   if (p) pageMac = sources[p - 1].name;
 }
 
 // Dots at the bottom of the status screen, one per page, the current one filled
 static void drawPageDots() {
-  int n = sources.size() + 1, cur = currentPage() + 1;
+  int n = pageCount(), cur = pageIndex();
   const int gap = 10, y = 204;
   int x = CX - (n - 1) * gap / 2;
   for (int i = 0; i < n; i++, x += gap) {
@@ -1089,6 +1183,199 @@ static void drawUsbIcon(int x, int y, uint32_t col) {
   frame.fillCircle(x - 4, y - 3, 1, col);
   frame.drawWideLine(x, y + 0, x + 4, y - 2, 0.8f, col);          // right branch, to a square
   frame.fillRect(x + 3, y - 5, 3, 3, col);
+}
+
+// ---- Now playing ----
+
+// The album cover, from POST /art or "@art" over USB: "<id> <base64 JPEG>". Only the latest is kept,
+// in memory. Returns the reply, or "" if it isn't a cover.
+static String applyArt(const String &arg) {
+  int sp = arg.indexOf(' ');
+  if (sp <= 0 || sp > 40) return "";
+  const unsigned char *b64 = (const unsigned char *)arg.c_str() + sp + 1;
+  size_t b64len = arg.length() - sp - 1, cap = b64len / 4 * 3 + 3, n = 0;
+  uint8_t *jpeg = (uint8_t *)malloc(cap);
+  if (!jpeg) return "";
+  bool ok = mbedtls_base64_decode(jpeg, cap, &n, b64, b64len) == 0 && n > 0;
+  if (ok && !artSprite.getBuffer()) {
+    artSprite.setColorDepth(16);
+    ok = artSprite.createSprite(ART, ART) != nullptr;
+  }
+  if (ok) {
+    artSprite.fillScreen(COL_TRACK);
+    ok = artSprite.drawJpg(jpeg, n, 0, 0, ART, ART);
+  }
+  free(jpeg);
+  artLoaded = ok ? arg.substring(0, sp) : String();
+  if (!ok) return "";
+  JsonDocument reply;
+  reply["ok"] = true;
+  return cardReply(reply);
+}
+
+static void handleArt() {
+  String reply = applyArt(server.arg("plain"));
+  if (reply.length()) server.send(200, "application/json", reply);
+  else server.send(400, "text/plain", "bad cover");
+}
+
+// The tap zones of the Now Playing controls, by x in screen pixels
+static String musicZone(int x) { return x < CX - 24 ? "prev" : x > CX + 24 ? "next" : "toggle"; }
+
+static void drawSkip(int x, int y, int dir, uint32_t col) {  // dir -1: previous, +1: next
+  frame.fillTriangle(x - 7 * dir, y - 7, x - 7 * dir, y + 7, x + 4 * dir, y, col);
+  frame.fillRect(dir > 0 ? x + 4 : x - 6, y - 7, 3, 15, col);
+}
+
+// ---- A GIF for when nothing's playing ----
+// The Mac sends it (POST /gif?id=...&size=..., multipart, Wi-Fi only); it's kept in PSRAM, only the
+// latest, and played frame by frame into gifSprite, a canvas up to 240x240 (bigger ones are cropped).
+static AnimatedGIF *gifDecoder = nullptr;
+static uint8_t *gifData = nullptr;
+static size_t gifSize = 0, gifGot = 0;
+static bool gifOpen = false, gifUploadOk = false;
+static String gifLoaded, gifIncoming;
+static LGFX_Sprite gifSprite;
+static uint32_t gifNextAt = 0;
+constexpr size_t GIF_MAX = 1536 * 1024;
+
+static void gifDraw(GIFDRAW *d) {
+  int y = d->iY + d->y, w = gifSprite.width();
+  if (y < 0 || y >= gifSprite.height()) return;
+  uint16_t *row = (uint16_t *)gifSprite.getBuffer() + y * w;
+  const uint8_t *px = d->pPixels;
+  const uint16_t *pal = d->pPalette;  // big-endian RGB565, as LovyanGFX keeps 16-bit sprites
+  for (int x = 0; x < d->iWidth; x++) {
+    int sx = d->iX + x;
+    if (sx < 0 || sx >= w) continue;
+    uint8_t c = px[x];
+    if (d->ucHasTransparency && c == d->ucTransparent) continue;
+    row[sx] = pal[c];
+  }
+}
+
+static void gifClose() {
+  if (gifOpen) gifDecoder->close();
+  gifOpen = false;
+  gifLoaded = "";
+}
+
+static bool gifStart() {
+  if (!gifDecoder) {
+    gifDecoder = new AnimatedGIF();
+    gifDecoder->begin(GIF_PALETTE_RGB565_BE);
+  }
+  if (!gifDecoder->open(gifData, gifSize, gifDraw)) return false;
+  int w = min(gifDecoder->getCanvasWidth(), 240), h = min(gifDecoder->getCanvasHeight(), 240);
+  if (gifSprite.getBuffer() && (gifSprite.width() != w || gifSprite.height() != h)) gifSprite.deleteSprite();
+  if (!gifSprite.getBuffer()) {
+    gifSprite.setColorDepth(16);
+    gifSprite.setPsram(true);
+    if (!gifSprite.createSprite(w, h)) {
+      gifDecoder->close();
+      return false;
+    }
+  }
+  gifSprite.fillScreen(COL_BG);
+  gifOpen = true;
+  gifNextAt = 0;
+  return true;
+}
+
+static void handleGifUpload() {
+  HTTPUpload &up = server.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    gifClose();
+    size_t size = server.arg("size").toInt();
+    gifIncoming = server.arg("id");
+    gifUploadOk = size > 0 && size <= GIF_MAX && gifIncoming.length() && gifIncoming.length() <= 40;
+    if (gifUploadOk && gifData && size > gifSize) {
+      free(gifData);
+      gifData = nullptr;
+    }
+    if (gifUploadOk && !gifData) gifData = (uint8_t *)ps_malloc(size);
+    gifUploadOk = gifUploadOk && gifData;
+    gifSize = size;
+    gifGot = 0;
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (!gifUploadOk || gifGot + up.currentSize > gifSize) {
+      gifUploadOk = false;
+      return;
+    }
+    memcpy(gifData + gifGot, up.buf, up.currentSize);
+    gifGot += up.currentSize;
+  } else if (up.status == UPLOAD_FILE_END) {
+    gifUploadOk = gifUploadOk && gifGot == gifSize && gifStart();
+    if (gifUploadOk) gifLoaded = gifIncoming;
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    gifUploadOk = false;
+  }
+}
+
+static void handleGifDone() {
+  if (!gifUploadOk) {
+    server.send(400, "text/plain", "bad gif");
+    return;
+  }
+  Serial.println("GIF loaded: " + gifLoaded + " (" + String(gifSize / 1024) + " KB)");
+  JsonDocument reply;
+  reply["ok"] = true;
+  server.send(200, "application/json", cardReply(reply));
+}
+
+// Draws the GIF's current frame in the middle of the screen, moving on when that frame's time is up
+static void drawGif() {
+  if (millis() >= gifNextAt) {
+    int delayMs = 100;
+    int more = gifDecoder->playFrame(false, &delayMs);
+    if (more < 0) {  // broken: stop
+      gifClose();
+      return;
+    }
+    if (more == 0) gifDecoder->reset();  // the last frame: loop
+    gifNextAt = millis() + max(20, delayMs);
+  }
+  gifSprite.pushSprite(&frame, CX - gifSprite.width() / 2, CY - gifSprite.height() / 2);
+}
+
+static void drawMusic(const Music &m) {
+  if (!m.title.length() && m.gif.length()) {  // nothing playing: the GIF
+    frame.fillScreen(COL_BG);
+    if (gifOpen && m.gif == gifLoaded) drawGif();
+    else text("Nothing playing", CX, CY, COL_FAINT, &fonts::FreeSans9pt7b);
+    return;
+  }
+  frame.fillScreen(COL_BG);
+  uint32_t accent = m.player == "music" ? 0xFA2D48 : 0x1DB954;  // Apple Music pink, Spotify green
+  float pos = m.pos + (m.playing ? (millis() - m.at) / 1000.0f : 0);
+  if (m.dur > 0) pos = min(pos, m.dur);
+  ring(112, 119, m.dur > 0 ? 100.0f * pos / m.dur : 0, m.playing ? accent : lerpColor(accent, COL_TRACK, 0.6f));
+
+  const int top = 24;
+  if (m.art.length() && m.art == artLoaded && artSprite.getBuffer()) {
+    artSprite.pushSprite(&frame, CX - ART / 2, top);
+  } else {  // no cover (yet): a note
+    frame.fillRoundRect(CX - ART / 2, top, ART, ART, 8, COL_TRACK);
+    frame.fillSmoothCircle(CX - 8, top + 64, 9, COL_FAINT);
+    frame.fillRect(CX - 1, top + 26, 4, 39, COL_FAINT);
+    frame.fillTriangle(CX - 1, top + 26, CX + 18, top + 34, CX - 1, top + 40, COL_FAINT);
+  }
+  text(fit(m.title.length() ? m.title : String("Unknown track"), 176), CX, 136, COL_TEXT, &fonts::FreeSansBold9pt7b);
+  text(fit(m.artist, 170), CX, 157, COL_DIM, &fonts::Font2);
+
+  // Controls; the one just tapped lights up for a moment
+  const int y = 181;
+  bool lit = musicTapAt && millis() - musicTapAt < 300;
+  int litX = musicCmd == "prev" ? CX - 44 : musicCmd == "next" ? CX + 44 : CX;
+  if (lit) frame.fillSmoothCircle(litX, y, 14, COL_TRACK);
+  drawSkip(CX - 44, y, -1, COL_DIM);
+  drawSkip(CX + 44, y, 1, COL_DIM);
+  if (m.playing) {
+    frame.fillRect(CX - 6, y - 8, 4, 17, COL_TEXT);
+    frame.fillRect(CX + 3, y - 8, 4, 17, COL_TEXT);
+  } else {
+    frame.fillTriangle(CX - 5, y - 9, CX - 5, y + 9, CX + 9, y, COL_TEXT);
+  }
 }
 
 // The status screen for a state: the merged one, or with mac set, one Mac's own (a page you swipe
@@ -1521,6 +1808,15 @@ static String cardReply(JsonDocument &reply) {
   o["id"] = openId;
   o["src"] = openSrc;  // only that Mac opens it ("" for any, as before)
   o["tap"] = TAP_TO_OPEN;  // whether a tap on the display can ask (so the Mac checks in more often)
+  // Now playing: what's on screen, the cover the display has, and the controls last tapped
+  reply["view"] = !key.length() && pageMusic && musicAvailable() ? "music" : "status";
+  reply["art"] = artLoaded;
+  reply["gif"] = gifLoaded;
+  JsonObject mc = reply["music_cmd"].to<JsonObject>();
+  mc["boot"] = openBoot;
+  mc["seq"] = musicSeq;
+  mc["cmd"] = musicCmd;
+  mc["src"] = st.music.src;
   String out;
   serializeJson(reply, out);
   return out;
@@ -1567,6 +1863,12 @@ static void handleSerialLine(const String &line) {
     if (reply.length()) usbHeardAt = millis() | 1;
   } else if (cmd == "@dismiss") {
     reply = applyDismiss(arg);
+  } else if (cmd == "@art") {
+    reply = applyArt(arg);
+    if (!reply.length()) {
+      code = 400;
+      reply = "bad cover";
+    }
   } else if (cmd == "@info") {
     reply = infoJson();
   } else if (cmd == "@pair") {
@@ -1700,6 +2002,8 @@ void setup() {
   server.on("/", HTTP_GET, handleRoot);
   server.on("/screen.bmp", HTTP_GET, handleScreenshot);
   server.on("/dismiss", HTTP_POST, handleDismiss);
+  server.on("/art", HTTP_POST, handleArt);
+  server.on("/gif", HTTP_POST, handleGifDone, handleGifUpload);
   server.on("/wifi/reset", HTTP_POST, handleWifiReset);
   server.on("/brightness", handleBrightness);
 #ifdef BOARD_LILYGO_T_RGB
@@ -1900,17 +2204,43 @@ void loop() {
   }
 
   bool statusShowing = !diagnosticsSince && !card.alert && !card.ci && !card.done;
-  if (swiped && statusShowing && !(millis() - darkChanged < TAP_DELAY_MS ? wasDark : dark)) turnPage(swiped);
+  bool lookedDark = millis() - darkChanged < TAP_DELAY_MS ? wasDark : dark;
+  if (swiped && statusShowing && !lookedDark) turnPage(swiped);
+
+  // Now playing comes up by itself while it plays and Claude has nothing on (unless that's off),
+  // and goes again once a session starts working
+  static bool idleMusicBefore = false;
+  bool claudeIdle = st.busy == 0 && st.waiting == 0;
+  bool idleMusic = claudeIdle && musicAvailable() && st.music.autoIdle &&
+                   (st.music.playing || (!st.music.title.length() && st.music.gif.length()));
+  if (idleMusic && !idleMusicBefore && !pageMusic) pageMusic = musicAuto = true;
+  if (!claudeIdle && musicAuto) pageMusic = musicAuto = false;
+  idleMusicBefore = idleMusic;
+
+  // Its controls: a tap on previous, play/pause or next (touch screens), or a double tap or BOOT
+  // press anywhere for play/pause. dismiss has nothing to do here: no card is showing.
+  bool onMusic = statusShowing && pageMusic && musicAvailable() && st.music.title.length() && !lookedDark;
+  if (onMusic && (openTap || dismiss)) {
+    int tx, ty;
+    musicCmd = openTap && !dismiss && lastTapPoint(&tx, &ty) ? musicZone(tx) : String("toggle");
+    musicSeq++;
+    musicTapAt = millis() | 1;
+    musicAuto = false;
+    Serial.println("Now playing: " + musicCmd);
+  }
 
   if (diagnosticsSince) drawDiagnostics(millis() - diagnosticsSince);
   else if (card.alert) drawAlert(*card.alert, card.waiting - 1);
   else if (card.ci) drawCI(st.ci);
   else if (card.done) drawDone(*card.done, st.done - 1);
-  else {
+  else if (pageMusic && musicAvailable()) {
+    drawMusic(st.music);
+    drawPageDots();
+  } else {
     int page = currentPage();
     if (page < 0) drawStatus(st, stale);
     else drawStatus(sources[page].state, millis() - sources[page].state.rxMillis > STALE_MS, &sources[page].name);
-    if (sources.size() >= 2) drawPageDots();
+    if (pageCount() >= 2) drawPageDots();
   }
   if (openShownAt && millis() - openShownAt < 2500 && !diagnosticsSince) {
     frame.fillRoundRect(CX - 78, 198, 156, 20, 10, COL_TRACK);

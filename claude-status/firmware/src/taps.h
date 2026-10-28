@@ -17,3 +17,6 @@ uint32_t fiveTapCount();    // five quick taps (more in the same run don't count
 uint32_t swipeLeftCount();
 uint32_t swipeRightCount();
 uint8_t lastTouchGesture();
+
+// Where the last single tap landed, in 240x240 screen pixels; false where taps aren't on the screen.
+bool lastTapPoint(int *x, int *y);

@@ -8,7 +8,7 @@ import SwiftUI
 final class MonitorModel: ObservableObject {
     /// outdated = a helper from before this app, without GET /settings
     enum Connection { case unknown, online, offline, outdated }
-    enum Section: Hashable { case header, usage, night, display, alerts }
+    enum Section: Hashable { case header, usage, night, display, music, alerts }
 
     @Published private(set) var connection = Connection.unknown
     @Published private(set) var status: HelperStatus?

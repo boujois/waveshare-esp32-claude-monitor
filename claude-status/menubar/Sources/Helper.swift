@@ -40,6 +40,7 @@ extension Settings {
         "status_page": .bool(true), "chat_alerts": .bool(true), "check_replies": .bool(true),
         "night_mode": .bool(false), "night_start": .string("22:00"), "night_end": .string("07:00"),
         "night_screen": .string("off"), "night_alerts": .bool(true),
+        "music": .bool(false), "music_covers": .bool(true), "music_idle": .bool(true), "music_gif": .bool(true),
     ]
 
     func bool(_ key: String) -> Bool {
