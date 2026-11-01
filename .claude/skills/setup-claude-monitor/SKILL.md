@@ -128,7 +128,7 @@ The rings show the 5-hour and weekly limits of a Pro or Max plan. They use the *
 
 1. 🙋 They click the **Claude Monitor** icon in the menu bar (a small circle inside a circle, near the clock), then **Connect** under **Plan usage**. If the terminal `claude` isn't signed in, Terminal opens and runs `claude auth login`, which opens the browser; the panel waits and carries on by itself once they're signed in. If the icon is hidden (a full menu bar or the notch), they open **Claude Monitor** from `~/Applications` or Spotlight to get the same panel in a window.
 2. 🙋 macOS asks whether `security` can read "Claude Code-credentials". They should click **Always Allow**. If they click *Deny*, the panel shows the error; they click **Try again** and then **Always Allow**.
-3. Verify with `curl -s http://127.0.0.1:47823/state | jq .usage`. You should see `h5` and `d7` percentages. `curl -s http://127.0.0.1:47823/settings | jq .status.usage` shows the state the panel shows (`ok`, `pending`, `signed_out` or `error`, with a message).
+3. Verify with `curl -s http://127.0.0.1:47823/state | jq .usage`. You should see `h5` and `d7` percentages. On a plan with no 5-hour limit, `h5` is `-1` and only the weekly ring shows; that's correct. `curl -s http://127.0.0.1:47823/settings | jq .status.usage` shows the state the panel shows (`ok`, `pending`, `signed_out` or `error`, with a message).
 
 **Without the menu bar app** (macOS 12 or older, or a dev install that skipped it):
 

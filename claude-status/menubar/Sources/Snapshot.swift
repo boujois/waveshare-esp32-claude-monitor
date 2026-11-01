@@ -5,7 +5,7 @@ import SwiftUI
 // clicking the menu bar). Live data from the helper, or a canned --fixture.
 @MainActor
 enum Snapshot {
-    static let fixtures = ["connected", "off", "signed_out", "offline", "pending", "error", "signing_in",
+    static let fixtures = ["connected", "no_five_hour", "off", "signed_out", "offline", "pending", "error", "signing_in",
                            "connecting", "no_cli", "old_firmware", "updating"]
 
     static func run(to path: String, options: LaunchOptions) -> Never {
@@ -111,6 +111,10 @@ enum Snapshot {
             status.counts = SessionCounts(waiting: 1, busy: 2, error: 0, done: 0, idle: 1)
             status.display?.card = DisplayCard(key: "alert;Fix login redirect|0;", icon: "exclamation",
                                                title: "Permission", name: "Fix login redirect")
+        case "no_five_hour":
+            settings["plan_usage"] = .bool(true)
+            status.usage = UsageStatus(state: "ok", message: "", h5: nil, d7: 22, h5Reset: 0, d7Reset: thursday,
+                                       at: now - 120)
         case "off":
             break
         case "signed_out", "signing_in":

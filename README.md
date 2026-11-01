@@ -63,7 +63,7 @@ The alert clears itself as soon as you respond, so you don't need to touch the d
 **⚪ The rest of the time**, you get a calm status screen:
 
 - 🕐 The current time
-- 🔶 **5-hour plan usage** (outer ring) and 🔷 **weekly plan usage** (inner ring), each with a countdown to its reset and a tick showing whether you're on pace
+- 🔶 **5-hour plan usage** (outer ring) and 🔷 **weekly plan usage** (inner ring), each with a countdown to its reset and a tick showing whether you're on pace (on a plan with no 5-hour limit, just the weekly ring)
 - **How many sessions are working**, plus up to three active ones, each with a status dot and how long it's been working
 - 🐱 **A little tabby cat** beside the headline, acting out what's going on: typing while sessions work, waving when something needs you, cheering when they've finished, and curled up asleep when nothing's happening
 - 📊 **Today's activity**: prompts sent and tokens processed, across every session
@@ -304,7 +304,7 @@ Ask Claude something that needs your approval, or just ask it to *"ask me a ques
 
 ### 6. (Optional) Turn on plan usage rings
 
-The rings show your 5-hour and weekly plan limits, the same numbers as Claude Code's `/usage` screen. They're for Claude Pro and Max plans. They use the sign-in of the **terminal** `claude` command. The desktop app keeps its own separate sign-in, so you need to sign the terminal in once.
+The rings show your 5-hour and weekly plan limits, the same numbers as Claude Code's `/usage` screen. They're for Claude Pro and Max plans. Some Max plans no longer have a 5-hour limit: the display and the menu bar app notice and show only the weekly one. They use the sign-in of the **terminal** `claude` command. The desktop app keeps its own separate sign-in, so you need to sign the terminal in once.
 
 **a. Connect.** Click the Claude Monitor icon in the menu bar, then click **Connect** under **Plan usage**.
 
@@ -383,7 +383,7 @@ Click it for:
 
 - **Status:** whether the display is connected, and which firmware it runs; your sessions, e.g. *1 needs you · 2 working*; any Anthropic incident; and an **Update to v1.x.x…** button when there's a new release.
 - **What's on the display:** the alert, Done card or CI card on its screen, with an **Open** button that brings up the app that session runs in (see [Jump to the session](#jump-to-the-session)) and a **Dismiss** button that hides it just like a double tap. These need display firmware newer than v1.5.0 (see [Updating](#updating)); Open needs a newer one still.
-- **Plan usage:** **Connect**, then your 5-hour and weekly usage and when each resets. **Disconnect** turns it off. See [step 6](#6-optional-turn-on-plan-usage-rings).
+- **Plan usage:** **Connect**, then your 5-hour and weekly usage and when each resets. A plan with no 5-hour limit shows just weekly. **Disconnect** turns it off. See [step 6](#6-optional-turn-on-plan-usage-rings).
 - **Night mode:** on or off, **From** and **To** times, **Screen** *Off* or *Dim*, and **Alerts still light it up**. See [Night mode](#night-mode).
 - **Display:** switches for **Cat**, **CI checks** and **Anthropic incidents**.
 - **Alerts:** switches for **Claude app chat alerts** and **Check replies with Haiku**.
@@ -480,9 +480,9 @@ It updates the Mac helper and the menu bar app, keeping your settings, and sends
 
 From top to bottom:
 
-- **Rings:** the outer 🔶 ring is your 5-hour plan usage and the inner 🔷 ring is weekly usage. They fill clockwise from 12 o'clock. The small white **tick** on each ring shows how much of that window has gone by. If the coloured arc is past its tick, you're using your plan faster than it lasts. While Anthropic has an incident affecting Claude Code, the API or claude.ai, the usage rings make way for a pulsing **red** ring, and *Anthropic incident* shows where the usage numbers were, with the incident's name scrolling underneath, e.g. *Elevated errors for Claude Opus 5.5*. Red error dots are then most likely Anthropic's problem, not yours.
+- **Rings:** the outer 🔶 ring is your 5-hour plan usage and the inner 🔷 ring is weekly usage. On a plan with no 5-hour limit, the 🔷 weekly ring moves out to the edge of the screen and is the only one. They fill clockwise from 12 o'clock. The small white **tick** on each ring shows how much of that window has gone by. If the coloured arc is past its tick, you're using your plan faster than it lasts. While Anthropic has an incident affecting Claude Code, the API or claude.ai, the usage rings make way for a pulsing **red** ring, and *Anthropic incident* shows where the usage numbers were, with the incident's name scrolling underneath, e.g. *Elevated errors for Claude Opus 5.5*. Red error dots are then most likely Anthropic's problem, not yours.
 - **Time:** the current time, kept in sync over the internet (NTP). If your network blocks time servers, the display takes the time from your Mac instead.
-- **`5h 38%` / `wk 64%`:** the same usage as numbers, with the time left until each limit resets underneath. When you're ahead of the tick, it shows in yellow when you'd run out at this pace instead: `out 16:40`, or `out Fri` for the weekly limit.
+- **`5h 38%` / `wk 64%`:** the same usage as numbers, with the time left until each limit resets underneath. When you're ahead of the tick, it shows in yellow when you'd run out at this pace instead: `out 16:40`, or `out Fri` for the weekly limit. On a plan with no 5-hour limit, only `wk` shows, centred.
 - **Headline**, with [the cat](#the-cat) acting it out beside it:
   - **`2 working`:** sessions are busy
   - **`All done`** (green): sessions have finished; you'll usually see the green Done card instead
