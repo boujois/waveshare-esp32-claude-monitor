@@ -1,6 +1,7 @@
 #ifdef GLOW_PIN
 
 #include "glow.h"
+#include "glowmath.h"
 
 #include <Adafruit_NeoPixel.h>
 #include <Arduino.h>
@@ -37,7 +38,6 @@ static Rgbw colour(Glow g) {
 
 void glowBegin() {
   strip.begin();
-  strip.setBrightness(GLOW_MAX);
   strip.clear();
   strip.show();
 }
@@ -48,7 +48,7 @@ void glowShow(Glow g) {
   static bool first = true;
   uint32_t now = millis();
   bool animated = g == Glow::Waiting || g == Glow::Working;
-  if (!first && g == shown && (!animated || now - lastWrite < 30)) return;
+  if (!first && g == shown && (!animated || now - lastWrite < 20)) return;
   first = false;
   shown = g;
   lastWrite = now;
@@ -57,8 +57,13 @@ void glowShow(Glow g) {
   float k = 1.0f;
   if (g == Glow::Waiting) k = 0.15f + 0.85f * (0.5f + 0.5f * sinf(now * TWO_PI / 2400.0f));  // 2.4 s pulse: catches the eye
   if (g == Glow::Working) k = 0.45f + 0.55f * (0.5f + 0.5f * sinf(now * TWO_PI / 4000.0f));  // 4 s soft pulse: calmer
-  uint32_t px = strip.Color(c.r * k, c.g * k, c.b * k, c.w * k);
-  strip.fill(px);
+  // Scaled here rather than with setBrightness(), which rounds every LED the same way and leaves a
+  // dim fade only a few steps
+  float s = k * GLOW_MAX / 255.0f;
+  for (uint16_t i = 0; i < GLOW_LEDS; i++) {
+    strip.setPixelColor(i, glowDither(c.r * s, i, GLOW_LEDS), glowDither(c.g * s, i, GLOW_LEDS),
+                        glowDither(c.b * s, i, GLOW_LEDS), glowDither(c.w * s, i, GLOW_LEDS));
+  }
   strip.show();
 }
 
