@@ -240,7 +240,7 @@ private struct UsageSection: View {
                 switch model.usageState {
                 case "off":
                     HStack(alignment: .center, spacing: 10) {
-                        Caption("Show your 5-hour and weekly limits on the display.")
+                        Caption("Show your plan's usage limits on the display.")
                         Spacer(minLength: 0)
                         Button(action: model.connectUsage) {
                             if model.connecting {
@@ -260,7 +260,10 @@ private struct UsageSection: View {
                     }
                     KeychainHint()
                 case "ok":
-                    UsageBar(title: "5-hour", percent: usage?.h5, reset: Self.resetsIn(usage?.h5Reset))
+                    // A plan with no 5-hour limit reports a weekly figure but no 5-hour one
+                    if usage?.h5 != nil || usage?.d7 == nil {
+                        UsageBar(title: "5-hour", percent: usage?.h5, reset: Self.resetsIn(usage?.h5Reset))
+                    }
                     UsageBar(title: "Weekly", percent: usage?.d7, reset: Self.resetsAt(usage?.d7Reset))
                     HStack {
                         if let at = usage?.at, at > 0 {

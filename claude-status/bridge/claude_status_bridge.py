@@ -1158,6 +1158,8 @@ def request_plan_usage(token):
         pct = w.get("utilization", w.get("used_percentage"))
         return (float(pct) if pct is not None else -1), _epoch(w.get("resets_at"))
 
+    # five_hour is null on plans with no 5-hour limit: h5 stays -1, and with a weekly figure
+    # alongside it, the display and the menu bar app leave the 5-hour limit out
     h5, h5r = window("five_hour")
     d7, d7r = window("seven_day")
     return {"h5": h5, "h5_reset": h5r, "d7": d7, "d7_reset": d7r, "at": int(time.time())}

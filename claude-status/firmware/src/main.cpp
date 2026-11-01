@@ -3,8 +3,9 @@
 //
 // The Mac bridge (../bridge) POSTs a JSON summary to http://claude-status.local/state.
 // When a session needs input the screen shows a full-screen alert; otherwise it shows
-// session status, plan usage rings (5-hour outer, weekly inner) and today's activity, with a
-// tabby cat acting out what's going on (see cat.cpp). The cat also walks across at power-on.
+// session status, plan usage rings (5-hour outer, weekly inner, or weekly alone on a plan with no
+// 5-hour limit) and today's activity, with a tabby cat acting out what's going on (see cat.cpp).
+// The cat also walks across at power-on.
 // Double-tapping the case dismisses the alert or Done card on screen, as does a short press of the
 // BOOT button if your case leaves it reachable, or Dismiss in the Mac's menu bar app (POST /dismiss);
 // tapping it five times quickly shows diagnostics (see taps.cpp). Holding BOOT for 5 seconds
@@ -1098,6 +1099,11 @@ static void drawStatus(const State &st, bool stale, const String *mac = nullptr)
   bool live = st.valid && !stale;
   bool usage = live && st.haveUsage;
 
+  // Some plans have no 5-hour limit: Anthropic reports a weekly figure but no 5-hour one. The
+  // 5-hour ring and label go, and the weekly ring moves out to the screen's edge.
+  bool noH5 = st.h5 < 0 && st.d7 >= 0;
+  int weekR0 = noH5 ? 108 : 96, weekR1 = noH5 ? 118 : 104;
+
   // During an Anthropic incident, a red ring and the incident take the place of plan usage, so
   // red error dots can be read as Anthropic's problem rather than yours
   bool incident = live && st.incident.length();
@@ -1105,8 +1111,8 @@ static void drawStatus(const State &st, bool stale, const String *mac = nullptr)
     frame.fillArc(CX, CY, 106, 119, 0, 360, lerpColor(0x5A1612, COL_ERR, 0.3f + 0.5f * pulse(3000)));
     usage = false;
   } else {
-    ring(108, 118, usage ? st.h5 : 0, usageColor(st.h5, COL_CLAUDE));
-    ring(96, 104, usage ? st.d7 : 0, usageColor(st.d7, COL_WEEK));
+    if (!noH5) ring(108, 118, usage ? st.h5 : 0, usageColor(st.h5, COL_CLAUDE));
+    ring(weekR0, weekR1, usage ? st.d7 : 0, usageColor(st.d7, COL_WEEK));
   }
 
   time_t now = time(nullptr);
@@ -1126,8 +1132,8 @@ static void drawStatus(const State &st, bool stale, const String *mac = nullptr)
 
   // Pace ticks: usage past its tick will run out before the window resets
   if (usage) {
-    paceTick(108, 118, windowGone(st.h5Reset, H5_SECS, now));
-    paceTick(96, 104, windowGone(st.d7Reset, D7_SECS, now));
+    if (!noH5) paceTick(108, 118, windowGone(st.h5Reset, H5_SECS, now));
+    paceTick(weekR0, weekR1, windowGone(st.d7Reset, D7_SECS, now));
   }
 
   if (!live && mac) {
@@ -1151,18 +1157,19 @@ static void drawStatus(const State &st, bool stale, const String *mac = nullptr)
     ticker(st.incident, 78, chordWidth(78, STATUS_TEXT_R), COL_DIM);
   }
 
-  // Plan usage labels (5h left, weekly right). Underneath: when you'd run out at this pace, if
-  // that's before the reset, otherwise the time to the reset.
+  // Plan usage labels (5h left, weekly right, or weekly centred on its own). Underneath: when you'd
+  // run out at this pace, if that's before the reset, otherwise the time to the reset.
   if (usage) {
     auto pct = [](float v) { return v < 0 ? String("--") : String((int)lroundf(v)) + "%"; };
-    text("5h " + pct(st.h5), 88, 60, usageColor(st.h5, COL_CLAUDE), &fonts::Font2);
-    text("wk " + pct(st.d7), 152, 60, usageColor(st.d7, COL_WEEK), &fonts::Font2);
+    int weekX = noH5 ? CX : 152;
+    if (!noH5) text("5h " + pct(st.h5), 88, 60, usageColor(st.h5, COL_CLAUDE), &fonts::Font2);
+    text("wk " + pct(st.d7), weekX, 60, usageColor(st.d7, COL_WEEK), &fonts::Font2);
     if (now > 1700000000) {
       String out5 = runsOut(st.h5, st.h5Reset, H5_SECS, now), outWk = runsOut(st.d7, st.d7Reset, D7_SECS, now);
       if (out5.length()) text(out5, 88, 76, COL_WARN, &fonts::Font2);
-      else if (st.h5Reset) text(duration(st.h5Reset - now), 88, 76, COL_FAINT, &fonts::Font2);
-      if (outWk.length()) text(outWk, 152, 76, COL_WARN, &fonts::Font2);
-      else if (st.d7Reset) text(duration(st.d7Reset - now), 152, 76, COL_FAINT, &fonts::Font2);
+      else if (st.h5Reset && !noH5) text(duration(st.h5Reset - now), 88, 76, COL_FAINT, &fonts::Font2);
+      if (outWk.length()) text(outWk, weekX, 76, COL_WARN, &fonts::Font2);
+      else if (st.d7Reset) text(duration(st.d7Reset - now), weekX, 76, COL_FAINT, &fonts::Font2);
     }
   }
 
