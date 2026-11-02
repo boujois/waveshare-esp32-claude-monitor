@@ -37,6 +37,7 @@ When a session is waiting for a permission, an answer or a plan approval, the sc
 - [Without Wi-Fi: over the USB cable](#without-wi-fi-over-the-usb-cable)
 - [Using a LilyGO T-RGB](#using-a-lilygo-t-rgb)
 - [One display, several Macs](#one-display-several-macs)
+- [Now playing: Spotify and Apple Music](#now-playing-spotify-and-apple-music)
 - [Updating](#updating)
 - [Reading the screen](#reading-the-screen)
 - [Configuration](#configuration)
@@ -454,6 +455,19 @@ A display needs firmware from this version or later to merge Macs; older firmwar
 
 ---
 
+## Now playing: Spotify and Apple Music
+
+The display can show what's playing on your Mac, a swipe away from the Claude screen. Turn on **Now playing** in the [menu bar app](#the-menu-bar-app). It's off by default. The first time, macOS asks whether the Claude Monitor helper may control Spotify (or Music). Click **OK**. If you said no, allow it in **System Settings → Privacy & Security → Automation**.
+
+- **The screen:** the album cover, the track and artist, and a ring that fills as the track plays. The ring is green for Spotify and pink for Apple Music. When both apps have a track, the one playing wins. The helper never opens either app.
+- **Getting there:** swipe across the status screen. Now playing is the last page, after the Mac pages if [several Macs](#one-display-several-macs) share the display. Swipes work on the LilyGO T-RGB and the Waveshare touch board.
+- **While Claude's idle:** when music is playing and no session is working or waiting, the display switches to Now playing by itself. It goes back to the Claude screen as soon as a session starts working. Alerts always show on top. To stay on the Claude screen, turn off **Show when Claude's idle**.
+- **Controls:** on a touch screen, tap ⏮ on the left, ⏯ in the middle or ⏭ on the right. A double tap anywhere (or a BOOT press) plays or pauses on every board, including the Waveshare without touch.
+- **A GIF when nothing's playing:** with nothing playing (or a track paused for 2 minutes), Now playing shows a looping GIF from Giphy instead, and comes up by itself while Claude's idle, like music does. By default it's a friendly wave. List your own in `gifs` in [`config.json`](#mac-helper-configjson), as Giphy links, and the helper picks one at random every `gif_minutes`. For a random pick from a Giphy search instead, get a free API key at [developers.giphy.com](https://developers.giphy.com) and set `giphy_api_key` and `giphy_search`. The GIF goes to the display over Wi-Fi only (not the USB cable), and only the current one is kept, in memory. Turn it off with **GIF when nothing's playing**.
+- **Album covers** have their own switch. Spotify's cover is downloaded from Spotify's image server; Apple Music's comes from the Music app. Either way, it's shrunk to 96 × 96 pixels straight away, in a temporary folder that's deleted at once, and the original is thrown away. The helper keeps the last 20 small copies in memory only. The display keeps just the current one, in memory, replaced by the next.
+
+---
+
 ## Updating
 
 When a new version comes out, the display's footer alternates with **"Update: v1.x.x"**, and the menu bar panel shows an **Update to v1.x.x…** button. The helper checks GitHub once a day. To update, do any of these:
@@ -623,7 +637,7 @@ The Haiku check needs the terminal `claude` command to be signed in, the same as
 
 The helper keeps its settings in `config.json`, next to it: `~/Library/Application Support/Claude Monitor/config.json`, or `claude-status/bridge/config.json` if you installed from a git checkout, where it's git-ignored.
 
-The [menu bar app](#the-menu-bar-app) changes `plan_usage`, `cat`, `ci_checks`, `status_page`, `chat_alerts`, `check_replies` and the `night_` settings while the helper runs. It saves them here, and they take effect straight away.
+The [menu bar app](#the-menu-bar-app) changes `plan_usage`, `cat`, `ci_checks`, `status_page`, `chat_alerts`, `check_replies`, the `night_` settings and the `music` settings while the helper runs. It saves them here, and they take effect straight away.
 
 To change anything else, edit the file and restart the helper. All keys are optional. Keep the ones already there, especially `device_key`, the display's pairing key, which the helper adds by itself. On/off settings must be `true` or `false`; anything else, such as `"false"` or `0`, counts as the default.
 
@@ -651,6 +665,14 @@ launchctl kickstart -k gui/$(id -u)/com.claude-status.bridge
 | `night_end` | `"07:00"` | When night ends. Earlier than `night_start` runs past midnight; the two can't be the same |
 | `night_screen` | `"off"` | `"off"` turns the screen off at night; `"dim"` keeps it very dim |
 | `night_alerts` | `true` | A session that needs you still lights the screen at night |
+| `music` | `false` | Show what's playing in Spotify or Apple Music (see [Now playing](#now-playing-spotify-and-apple-music)) |
+| `music_covers` | `true` | Album covers on the Now playing screen |
+| `music_idle` | `true` | Switch to Now playing by itself while music plays (or the GIF shows) and Claude is idle |
+| `music_gif` | `true` | With nothing playing, show a GIF from Giphy on Now playing |
+| `gifs` | a wave | Giphy links (or ids) to pick the GIF from, at random |
+| `gif_minutes` | `10` | How often (minutes) to pick another GIF, when there's more than one |
+| `giphy_api_key` | `""` | A Giphy API key: with one, GIFs come from a search for `giphy_search` instead of `gifs` |
+| `giphy_search` | `"hello hi wave"` | What to search Giphy for, with an API key |
 | `usb_fallback` | `true` | Send updates over the display's USB cable when Wi-Fi can't reach it (see [Without Wi-Fi](#without-wi-fi-over-the-usb-cable)) |
 | `listen_port` | `47823` | Local port for hooks, the chat connector and the menu bar app. If you change it, also update the URL in `hooks.py` and `chat_mcp.py`, then re-run `install.sh`, which passes the new port to the menu bar app |
 
@@ -806,6 +828,7 @@ It's your Claude activity, so here's exactly what this project touches:
 - **Plan usage (opt-in only, with Connect in the menu bar app)** reads the terminal `claude` login's token from your Keychain and sends it **only to `api.anthropic.com`**. When the token expires, the helper runs one tiny `claude -p ok` request so the CLI renews it.
 - **CI checks:** for the session you have open in the Claude app, the helper runs `gh pr view` in that session's folder, which asks **GitHub** about the branch's pull request using your own `gh` sign-in. The display gets the pull request's number and title, and the names and results of its checks. Turn this off with `"ci_checks": false`.
 - **Anthropic's status page:** every 2 minutes the helper downloads the public summary from `status.claude.com`. The request carries nothing about you or your sessions. Turn this off with `"status_page": false`.
+- **Now playing (opt-in):** every 2 seconds the helper asks Spotify and Music, if they're running, what they're playing. The display gets the track name, artist and position. With album covers on, a Spotify cover is downloaded from Spotify's image server (`i.scdn.co`), only the URL Spotify gives for the current track. Each cover passes through a temporary folder only while it's shrunk, then lives in memory; the display only ever holds the current one. With nothing playing, the helper downloads a GIF from Giphy (`media.giphy.com`, and with your API key a search on `api.giphy.com`), which carries nothing about you or your sessions. Turn this off with `"music": false`, just the covers with `"music_covers": false`, or the GIF with `"music_gif": false`.
 - **Nothing else leaves your Mac.** There's no telemetry, cloud service or account.
 
 - **Updates:** the helper checks GitHub's public API for the latest release once a day. Firmware updates only go from your Mac to the display, using the pairing key in `config.json`.

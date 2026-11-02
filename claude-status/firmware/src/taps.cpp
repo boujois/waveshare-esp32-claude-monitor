@@ -257,3 +257,4 @@ uint32_t fiveTapCount() { return fives; }
 uint32_t swipeLeftCount() { return swipesLeft; }
 uint32_t swipeRightCount() { return swipesRight; }
 uint8_t lastTouchGesture() { return lastGesture; }
+bool lastTapPoint(int *, int *) { return false; }  // single taps come from touch screens only
