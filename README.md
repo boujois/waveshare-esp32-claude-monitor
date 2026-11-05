@@ -603,7 +603,7 @@ Night mode needs a display firmware that has it. If the panel says *Update the d
 When a Claude Code turn ends, the helper reads Claude's final message:
 
 1. **Phrase check.** If the message ends with a question, or a request like *"after you approve"*, *"please confirm"*, *"should I…"* or *"over to you"*, the display shows a **Question** alert straight away.
-2. **Haiku check.** If the phrases don't catch it, the helper asks Claude Haiku, through the terminal `claude` command, whether the message is waiting on you, and gets a one-line summary for the display. Each check takes a few seconds and uses a sliver of your plan.
+2. **Haiku check.** If the phrases don't catch it, the helper asks Claude Haiku, through the terminal `claude` command, whether the message is waiting on you, and gets a one-line summary for the display. Each check takes a few seconds and uses a sliver of your plan. The check is skipped while the session still has work running in the background, such as a command, agent or workflow it started. Claude Code wakes the session when that work finishes, so *"Still waiting for the render."* isn't waiting on you.
 
 The Haiku check needs the terminal `claude` command to be signed in, the same as the [plan usage rings](#6-optional-turn-on-plan-usage-rings). Without that sign-in, only the phrase check runs. To turn the Haiku check off, switch off **Check replies with Haiku** in the menu bar app, or set `"check_replies": false` in `config.json`. When the helper starts, it also checks idle sessions from the last 24 hours, so nothing is missed after a restart.
 
