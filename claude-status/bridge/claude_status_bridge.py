@@ -52,6 +52,8 @@ CLAUDE_DIR = Path.home() / ".claude"
 SESSIONS_DIR = CLAUDE_DIR / "sessions"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 CONFIG_PATH = Path(__file__).with_name("config.json")
+# Sessions whose question you dismissed from the menu bar app, so a restart doesn't raise it again
+DISMISSED_PATH = Path(__file__).with_name("dismissed.json")
 
 DEFAULT_CONFIG = {
     "device_host": "claude-status.local",
@@ -383,12 +385,17 @@ class HookState:
     """Per-session waiting entries keyed by tool_use_id (or a fixed key for
     notifications/elicitations), plus finish/error times."""
 
-    def __init__(self, classify=False):
+    def __init__(self, classify=False, dismissed_path=DISMISSED_PATH):
         self.classify = classify
         self.lock = threading.Lock()
         self.sessions = {}  # session_id -> {"waiting": {key: entry}, "done_at", "error", "cwd", "last"}
         self.version = 0
         self.events_seen = 0
+        self.dismissed_path = dismissed_path
+        try:  # session_id -> when you dismissed its question
+            self.dismissed = {k: float(v) for k, v in json.loads(dismissed_path.read_text()).items()}
+        except (OSError, ValueError, AttributeError, TypeError):
+            self.dismissed = {}
 
     def _get(self, sid, cwd):
         s = self.sessions.setdefault(sid, {"waiting": {}, "done_at": 0, "error": None, "cwd": cwd, "last": 0,
@@ -533,7 +540,7 @@ class HookState:
                 if d.get("status") != "idle":
                     continue
                 reply, when = last_turn_reply(sid)
-                if not reply or time.time() - when > max_age:
+                if not reply or time.time() - when > max_age or self.dismissed.get(sid, 0) >= when:
                     continue
                 classify = self.classify and not self.background_running(sid, started_at=d.get("startedAt") or 0)
                 request = waiting_request(reply, classify)
@@ -545,6 +552,31 @@ class HookState:
                         self.version += 1
                     log(f"{sid[:8]} last reply is waiting on you - flagging it")
         threading.Thread(target=run, daemon=True).start()
+
+    def dismiss_question(self, short_id, max_age=24 * 3600):
+        """Dismiss in the menu bar app on a session's alert (by the 8-character id the display
+        knows it by). A question read from the end of its reply, by the phrases or the Haiku check,
+        is likely a false alarm, so the session stops waiting until its next turn ends, and a
+        restart doesn't raise it again. Returns the question cleared, or None. What hooks reported
+        (a permission prompt, AskUserQuestion, a plan) stays: the session is really blocked on it."""
+        now = time.time()
+        with self.lock:
+            sid = next((k for k, s in self.sessions.items()
+                        if k.startswith(short_id) and "ended" in s["waiting"]), None)
+            if not short_id or not sid:
+                return None
+            entry = self.sessions[sid]["waiting"].pop("ended")
+            self.dismissed = {k: t for k, t in self.dismissed.items() if now - t < max_age}
+            self.dismissed[sid] = now
+            self.version += 1
+            try:
+                tmp = self.dismissed_path.with_name(f".{self.dismissed_path.name}.tmp")
+                tmp.write_text(json.dumps(self.dismissed) + "\n")
+                os.replace(tmp, self.dismissed_path)
+            except OSError as e:
+                log("couldn't save dismissed questions:", e)
+        log(f"{sid[:8]} question dismissed from the menu bar - no longer waiting: {entry['detail']}")
+        return entry["detail"]
 
     def mark_done_seen(self, sid):
         """You're looking at this session in the Claude app, so its Done card can go."""
@@ -2568,7 +2600,9 @@ class Bridge:
 
     def dismiss_card(self, key):
         """POST /display/dismiss: dismisses the card on the display's screen if it's still the
-        one with this key (any card, with None). Raises DisplayError."""
+        one with this key (any card, with None). A question alert's session stops waiting too, as
+        the question was likely a false alarm. Raises DisplayError."""
+        card = self.device.card
         try:
             dismissed = self.device.dismiss(key)
         except urllib.error.HTTPError as e:
@@ -2579,6 +2613,10 @@ class Bridge:
             log("dismiss failed:", e)
             raise DisplayError("Couldn't reach the display.") from None
         log("dismissed the card on the display" if dismissed else "dismiss: the display's card had changed")
+        if (dismissed and card and (key is None or card["key"] == key) and card["key"].startswith("alert")
+                and card.get("id") and card.get("src", "") in ("", self.device.source)):
+            if self.hooks.dismiss_question(card["id"]):
+                self.push_soon = True
 
     def open_card(self, key):
         """POST /display/open: brings the app running the session on the display's card to the
