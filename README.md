@@ -383,7 +383,7 @@ Claude Monitor puts a small icon in your Mac's menu bar, near the clock: a **cir
 Click it for:
 
 - **Status:** whether the display is connected, and which firmware it runs; your sessions, e.g. *1 needs you · 2 working*; any Anthropic incident; and an **Update to v1.x.x…** button when there's a new release.
-- **What's on the display:** the alert, Done card or CI card on its screen, with an **Open** button that brings up the app that session runs in (see [Jump to the session](#jump-to-the-session)) and a **Dismiss** button that hides it just like a double tap. These need display firmware newer than v1.5.0 (see [Updating](#updating)); Open needs a newer one still.
+- **What's on the display:** the alert, Done card or CI card on its screen, with an **Open** button that brings up the app that session runs in (see [Jump to the session](#jump-to-the-session)) and a **Dismiss** button that hides it just like a double tap. Dismissing a Question alert also tells the helper the session isn't waiting on you (see [How replies that need you are spotted](#how-replies-that-need-you-are-spotted)). These need display firmware newer than v1.5.0 (see [Updating](#updating)); Open needs a newer one still.
 - **Plan usage:** **Connect**, then your 5-hour and weekly usage and when each resets. A plan with no 5-hour limit shows just weekly. **Disconnect** turns it off. See [step 6](#6-optional-turn-on-plan-usage-rings).
 - **Night mode:** on or off, **From** and **To** times, **Screen** *Off* or *Dim*, and **Alerts still light it up**. See [Night mode](#night-mode).
 - **Display:** switches for **Cat**, **CI checks** and **Anthropic incidents**.
@@ -538,7 +538,7 @@ Prefer the plain status screen? Switch off **Cat** in the [menu bar app](#the-me
 
 If several sessions are waiting, the one that has waited longest is shown, and the footer says `+N more`.
 
-**Want it to go away?** Double-tap the case: two quick, firm taps with a fingertip, anywhere on the case. A short press of the **BOOT** button does the same, if your case leaves it reachable. That hides the alert until a *new* request comes in, and the status screen then shows `N waiting` in orange instead. **Dismiss** in the [menu bar app](#the-menu-bar-app) does the same from your Mac.
+**Want it to go away?** Double-tap the case: two quick, firm taps with a fingertip, anywhere on the case. A short press of the **BOOT** button does the same, if your case leaves it reachable. That hides the alert until a *new* request comes in, and the status screen then shows `N waiting` in orange instead. **Dismiss** in the [menu bar app](#the-menu-bar-app) does the same from your Mac. For a **Question** alert, it also marks that session as no longer waiting, so it drops out of `N waiting` (see [How replies that need you are spotted](#how-replies-that-need-you-are-spotted)).
 
 Double tap uses the board's built-in motion sensor. Typing, putting a mug down or knocking on the desk doesn't set it off, and neither does picking the display up.
 
@@ -606,6 +606,8 @@ When a Claude Code turn ends, the helper reads Claude's final message:
 2. **Haiku check.** If the phrases don't catch it, the helper asks Claude Haiku, through the terminal `claude` command, whether the message is waiting on you, and gets a one-line summary for the display. Each check takes a few seconds and uses a sliver of your plan. The check is skipped while the session still has work running in the background, such as a command, agent or workflow it started. Claude Code wakes the session when that work finishes, so *"Still waiting for the render."* isn't waiting on you.
 
 The Haiku check needs the terminal `claude` command to be signed in, the same as the [plan usage rings](#6-optional-turn-on-plan-usage-rings). Without that sign-in, only the phrase check runs. To turn the Haiku check off, switch off **Check replies with Haiku** in the menu bar app, or set `"check_replies": false` in `config.json`. When the helper starts, it also checks idle sessions from the last 24 hours, so nothing is missed after a restart.
+
+These checks can be wrong. If a **Question** alert shows for a reply that isn't waiting on you, click **Dismiss** in the [menu bar app](#the-menu-bar-app). The helper then stops counting that session as waiting until its next turn ends, and doesn't raise the same reply again after a restart. The helper's log notes each one (`question dismissed from the menu bar`), to help tune the checks. Permission prompts, plan reviews and questions Claude asks with its question tool come straight from Claude Code, so Dismiss only hides those; the session stays waiting until you answer.
 
 ### Colour guide
 
