@@ -6,7 +6,8 @@
 // session status, plan usage rings (5-hour outer, weekly inner, or weekly alone on a plan with no
 // 5-hour limit) and today's activity, with a tabby cat acting out what's going on (see cat.cpp).
 // The cat also walks across at power-on.
-// Double-tapping the case dismisses the alert or Done card on screen, as does a short press of the
+// Double-tapping the case dismisses the alert or Done card on screen (or, with none, hides an
+// Anthropic incident until it's over), as does a short press of the
 // BOOT button if your case leaves it reachable, or Dismiss in the Mac's menu bar app (POST /dismiss);
 // tapping it five times quickly shows diagnostics (see taps.cpp). Holding BOOT for 5 seconds
 // forgets the Wi-Fi network and reopens Wi-Fi setup.
@@ -462,6 +463,9 @@ struct Source {
 static std::vector<Source> sources;  // in the order they were first heard from
 static String dismissedWaiting, dismissedDone;  // sessions on screen when you last dismissed each card
 static String dismissedCI;                      // the CI card's key when you last dismissed it
+// The Anthropic incident you hid with a double tap on the status screen: it stays hidden until it's
+// over or a different one starts
+static String dismissedIncident;
 // Open on the Mac (a single tap on a card): the Mac brings that session's app to the front when
 // openSeq changes. openBoot tells this run apart from the last, as openSeq restarts at 0.
 static uint32_t openSeq = 0, openBoot = 0, openShownAt = 0;
@@ -1394,7 +1398,7 @@ static void drawStatus(const State &st, bool stale, const String *mac = nullptr)
 
   // During an Anthropic incident, a red ring and the incident take the place of plan usage, so
   // red error dots can be read as Anthropic's problem rather than yours
-  bool incident = live && st.incident.length();
+  bool incident = live && st.incident.length() && st.incident != dismissedIncident;
   if (incident) {
     frame.fillArc(CX, CY, 106, 119, 0, 360, lerpColor(0x5A1612, COL_ERR, 0.3f + 0.5f * pulse(3000)));
     usage = false;
@@ -2207,9 +2211,18 @@ void loop() {
     }
   }
 
+  // A double tap (or BOOT press) on the status screen with no card hides the Anthropic incident, so
+  // the usage rings come back; a tap that dismissed a card doesn't also hide it
+  bool hadCard = card.alert || card.ci || card.done;
   if (dismiss && !diagnosticsSince) {
     dismissCard(card);
     card = pickCard(stale, alertFirst);
+  }
+  if (!stale && !st.incident.length()) dismissedIncident = "";  // over: the next one shows again
+  if (dismiss && !diagnosticsSince && !hadCard && !(pageMusic && musicAvailable()) && st.incident.length() &&
+      st.incident != dismissedIncident) {
+    dismissedIncident = st.incident;
+    Serial.println("Incident hidden: " + st.incident);
   }
 
   bool statusShowing = !diagnosticsSince && !card.alert && !card.ci && !card.done;
